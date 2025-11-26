@@ -51,17 +51,10 @@
       dbg.textContent = code ? 'Received code ✓' : 'No code in URL';
 
       let posted = false;
-      try {
-        if (window.opener && code) {
-          // Post the code back to the userscript listening on the opener page
-          window.opener.postMessage({ source:'animetrack-oauth', code: code }, '*');
-          posted = true;
-        }
-      } catch (e) {
-        // ignore postMessage errors; fallback to manual copy below
-      }
+      let acked = false;
 
-      if (!posted && code) {
+      function showManualCopy() {
+        if (!code) return;
         row.style.display = 'block';
         box.textContent = code;
         btn.addEventListener('click', async () => {
@@ -70,8 +63,41 @@
         });
       }
 
-      // Close the relay tab after a moment if we posted successfully
-      if (posted) setTimeout(() => window.close(), 1500);
+      // Listen for acknowledgments from the opener/userscript
+      window.addEventListener('message', (e) => {
+        try {
+          if (!e || !e.data) return;
+          if (e.data.source === 'animetrack-ack') {
+            acked = true;
+            dbg.textContent = 'Code delivered (ack) ✓';
+          }
+          if (e.data.source === 'animetrack-connected' && e.data.ok) {
+            dbg.textContent = 'Connected ✓ — you can close this tab';
+            setTimeout(() => window.close(), 800);
+          }
+        } catch(_) {}
+      });
+
+      try {
+        if (window.opener && code) {
+          window.opener.postMessage({ source:'animetrack-oauth', code: code }, '*');
+          posted = true;
+          dbg.textContent = 'Posted code to opener… waiting for ack…';
+        }
+      } catch (e) {
+        // ignore; will fallback below
+      }
+
+      // Wait up to 2500ms for ack; if none, show manual copy and do NOT auto-close
+      setTimeout(() => {
+        if (posted && !acked) {
+          dbg.textContent = 'No ack from opener — use manual copy';
+          showManualCopy();
+        } else if (!posted) {
+          dbg.textContent = 'Opener unavailable — use manual copy';
+          showManualCopy();
+        }
+      }, 2500);
     })();
   </script>
 </body>

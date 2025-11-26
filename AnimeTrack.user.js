@@ -447,6 +447,12 @@
       const data = ev.data || {};
       if (data.source === 'animetrack-oauth' && data.code) {
         console.debug('[AnimeTrack] Received OAuth code via postMessage');
+        // Ack receipt back to oauth.html so it knows we heard it
+        try {
+          if (ev.source && ev.origin) {
+            ev.source.postMessage({ source: 'animetrack-ack', received: true }, ev.origin);
+          }
+        } catch(_) {}
         await getSettings(); // ensure MAL_CLIENT_ID / MAL_REDIRECT_URI loaded
         const code = String(data.code);
         const verifier = sessionStorage.getItem('animetrack_pkce_verifier') || code;
@@ -459,6 +465,11 @@
             toast('Connected to MAL');
             console.debug('[AnimeTrack] OAuth success');
             await renderPanel();
+            try {
+              if (ev.source && ev.origin) {
+                ev.source.postMessage({ source: 'animetrack-connected', ok: true }, ev.origin);
+              }
+            } catch(_) {}
           } else {
             const msg = 'OAuth exchange failed';
             await gm.setValue(STORAGE.oauthErr, msg);
