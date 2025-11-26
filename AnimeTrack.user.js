@@ -8,7 +8,7 @@
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
 // @supportURL   https://github.com/ShaharAviram1/AnimeTrack/issues
 // @updateURL    https://cdn.jsdelivr.net/gh/ShaharAviram1/AnimeTrack@latest/animeTrack.meta.js
-// @downloadURL  https://cdn.jsdelivr.net/gh/ShaharAviram1/AnimeTrack@latest/AnimeTrack.user.js
+// @downloadURL  https://cdn.jsdelivr.net/gh/ShaharAviram1/AnimeTrack@v1.3.4/AnimeTrack.user.js
 // @run-at       document-start
 // @grant        GM_getValue
 // @grant        GM_setValue
