@@ -2,13 +2,13 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.3.4
+// @version      1.3.6
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
 // @supportURL   https://github.com/ShaharAviram1/AnimeTrack/issues
 // @updateURL    https://cdn.jsdelivr.net/gh/ShaharAviram1/AnimeTrack@latest/animeTrack.meta.js
-// @downloadURL  https://cdn.jsdelivr.net/gh/ShaharAviram1/AnimeTrack@v1.3.5/AnimeTrack.user.js
+// @downloadURL  https://cdn.jsdelivr.net/gh/ShaharAviram1/AnimeTrack@v1.3.6/AnimeTrack.user.js
 // @run-at       document-start
 // @grant        GM_getValue
 // @grant        GM_setValue
