@@ -1,0 +1,10 @@
+{
+  "name": "AnimeTrack",
+  "version": "1.0.0",
+  "files": {
+    "userscript": "animeTrack.user.js"
+  },
+  "updateURL": "https://raw.githubusercontent.com/ShaharAviram1/AnimeTrack/main/animeTrack.user.js",
+  "downloadURL": "https://raw.githubusercontent.com/ShaharAviram1/AnimeTrack/main/animeTrack.user.js",
+  "license": "GPL-3.0-or-later"
+}

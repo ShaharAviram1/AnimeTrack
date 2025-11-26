@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AnimeTrack — OAuth Relay</title>
+  <style>
+    html,body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu; background:#0b0b0b; color:#fff; height:100%; margin:0; display:grid; place-items:center}
+    .card{background:#121212;padding:24px;border-radius:14px;box-shadow:0 8px 24px rgba(0,0,0,.35);max-width:680px}
+    code{background:#1e1e1e;padding:2px 6px;border-radius:6px}
+    .badge{display:inline-block;margin-top:10px;font-size:12px;opacity:.7}
+    .row{margin-top:12px}
+    button{border:0;border-radius:10px;padding:8px 10px;cursor:pointer;font-weight:600;background:#2d7ef7;color:#fff}
+    pre{white-space:pre-wrap;background:#1e1e1e;padding:8px;border-radius:8px;word-break:break-all}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>AnimeTrack — OAuth Relay</h1>
+    <p>If you see this page after authorizing, it will try to auto-connect your opener tab using <code>postMessage</code>.</p>
+    <p>If that fails (Safari/content blockers), copy the code below and paste it via <strong>Paste Code</strong> in the AnimeTrack panel.</p>
+    <div class="row"><span class="badge" id="dbg">Waiting…</span></div>
+    <div class="row" id="codeRow" style="display:none">
+      <div>Code:</div>
+      <pre id="codeBox"></pre>
+      <button id="copyBtn" type="button">Copy Code</button>
+    </div>
+  </div>
+  <script>
+    (function(){
+      function getParam(name){
+        const u = new URL(window.location.href);
+        if (u.searchParams.has(name)) return u.searchParams.get(name);
+        // Also support #code=... fallback
+        const hash = u.hash.replace(/^#?/, '');
+        if (!hash) return null;
+        const map = {};
+        hash.split('&').forEach(pair => {
+          const [k,v] = pair.split('=');
+          map[decodeURIComponent(k)] = v ? decodeURIComponent(v) : '';
+        });
+        return map[name] || null;
+      }
+
+      const dbg = document.getElementById('dbg');
+      const row = document.getElementById('codeRow');
+      const box = document.getElementById('codeBox');
+      const btn = document.getElementById('copyBtn');
+
+      const code = getParam('code');
+      dbg.textContent = code ? 'Received code ✓' : 'No code in URL';
+
+      let posted = false;
+      try {
+        if (window.opener && code) {
+          // Post the code back to the userscript listening on the opener page
+          window.opener.postMessage({ source:'animetrack-oauth', code: code }, '*');
+          posted = true;
+        }
+      } catch (e) {
+        // ignore postMessage errors; fallback to manual copy below
+      }
+
+      if (!posted && code) {
+        row.style.display = 'block';
+        box.textContent = code;
+        btn.addEventListener('click', async () => {
+          try { await navigator.clipboard.writeText(code); btn.textContent = 'Copied ✓'; }
+          catch { btn.textContent = 'Copy failed'; }
+        });
+      }
+
+      // Close the relay tab after a moment if we posted successfully
+      if (posted) setTimeout(() => window.close(), 1500);
+    })();
+  </script>
+</body>
+</html>
