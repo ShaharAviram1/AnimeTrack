@@ -2,13 +2,13 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.3.8
+// @version      1.3.9
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
 // @supportURL   https://github.com/ShaharAviram1/AnimeTrack/issues
 // @updateURL    https://raw.githubusercontent.com/ShaharAviram1/AnimeTrack/main/animeTrack.meta.js
-// @downloadURL  https://raw.githubusercontent.com/ShaharAviram1/AnimeTrack/v1.3.8/AnimeTrack.user.js
+// @downloadURL  https://raw.githubusercontent.com/ShaharAviram1/AnimeTrack/v1.3.9/AnimeTrack.user.js
 // @run-at       document-start
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -56,13 +56,14 @@
   const MAL_TOKEN_URL = 'https://myanimelist.net/v1/oauth2/token';
   const MAL_SEARCH    = 'https://api.myanimelist.net/v2/anime';
   const STORAGE = {
-    access: 'animetrack.malToken',
-    refresh: 'animetrack.malRefresh',
-    sites:   'animetrack.sites',
-    maps:    'animetrack.seriesMaps',
-    seeded:  'animetrack.seeded',
-    settings:'animetrack.settings',
-    oauthErr:'animetrack.oauthErr'
+  access: 'animetrack.malToken',
+  refresh: 'animetrack.malRefresh',
+  sites:   'animetrack.sites',
+  maps:    'animetrack.seriesMaps',
+  seeded:  'animetrack.seeded',
+  settings:'animetrack.settings',
+  pkce:    'animetrack.pkce',
+  oauthErr:'animetrack.oauthErr'
   };
   const SEEDED_HOSTS = new Set([
     '9anime.to','aniwatch.to','aniwatchtv.to','gogoanime.dk','gogoanime.fi','gogoanimehd.to','hianime.to','hianime.tv','zoro.to'
@@ -470,7 +471,7 @@
               if (ev.source && ev.origin) {
                 ev.source.postMessage({ source: 'animetrack-connected', ok: true }, ev.origin);
               }
-            } catch(_) {}
+            } catch (_) { }
           } else {
             const msg = 'OAuth exchange failed';
             await gm.setValue(STORAGE.oauthErr, msg);
@@ -478,10 +479,10 @@
             console.warn('[AnimeTrack]', msg);
           }
         } catch(e) {
-          const msg = 'OAuth failed: ' + (e && e.message || e);
-          await gm.setValue(STORAGE.oauthErr, String(msg));
-          toast(msg);
-          console.warn('[AnimeTrack]', msg);
+          const tmsg = 'OAuth failed: ' + (e && e.message || e);
+          await gm.setValue(STORAGE.oauthErr, String(tmsg));
+          toast(tmsg);
+          console.warn('[AnimeTrack] token error', tmsg);
         } finally {
           sessionStorage.removeItem('animetrack_pkce_verifier');
         }
@@ -493,13 +494,15 @@
   async function getSettings(){
     const s = await getJSON(STORAGE.settings, {});
     if (s.redirect_uri) MAL_REDIRECT_URI = s.redirect_uri;
-    return { client_id: MAL_CLIENT_ID, redirect_uri: MAL_REDIRECT_URI };
+    const pk = (typeof s.pkce_plain === 'boolean') ? s.pkce_plain : false;
+    return { client_id: MAL_CLIENT_ID, redirect_uri: MAL_REDIRECT_URI, pkce_plain: pk };
   }
   async function saveSettings(obj){
     const cur = await getJSON(STORAGE.settings, {});
     const nx = Object.assign({}, cur, obj||{});
     await setJSON(STORAGE.settings, nx);
     if (nx.redirect_uri) MAL_REDIRECT_URI = nx.redirect_uri;
+    if (typeof nx.pkce_plain === 'boolean') { /* persisted; runtime read via getSettings() */ }
   }
 
   async function renderPanel(){
@@ -578,6 +581,14 @@
             <input id="at-redirect" placeholder="Redirect URI (default: https://shaharaviram1.github.io/AnimeTrack/oauth.html)" style="flex:1">
             <button id="at-save-redirect" class="ghost">Save</button>
           </div>
+          <div class="row">
+            <label class="sub" style="min-width:130px">PKCE method</label>
+            <select id="at-pkce" style="flex:1">
+              <option value="S256">S256 (recommended)</option>
+              <option value="plain">plain (legacy)</option>
+            </select>
+            <button id="at-save-pkce" class="ghost">Save</button>
+          </div>
         </details>
       </div>
       <div class="row" style="margin-top:8px">
@@ -609,11 +620,24 @@
       await saveSettings({ redirect_uri: v || 'https://shaharaviram1.github.io/AnimeTrack/oauth.html' });
       toast('Saved Redirect URI');
     };
-
+    // Initialize PKCE method selector
+    (async () => {
+      const s2 = await getSettings();
+      const sel = card.querySelector('#at-pkce');
+      if (sel) sel.value = s2.pkce_plain ? 'plain' : 'S256';
+      const btn = card.querySelector('#at-save-pkce');
+      if (btn && sel) btn.onclick = async () => {
+        const plain = sel.value === 'plain';
+        await saveSettings({ pkce_plain: plain });
+        toast('Saved PKCE method: ' + (plain ? 'plain' : 'S256'));
+      };
+    })();
     // Diagnostics line (shows effective client & redirect)
     const diag = card.querySelector('#at-diag');
     if (diag) {
-      diag.textContent = `Diag → client ${MAL_CLIENT_ID.slice(0,8)}…  redirect ${MAL_REDIRECT_URI}`;
+      const s3 = await getSettings();
+      const pkceMode = s3.pkce_plain ? 'plain' : 'S256';
+      diag.textContent = `Diag → client ${MAL_CLIENT_ID.slice(0, 8)}…  redirect ${MAL_REDIRECT_URI}  pkce ${pkceMode}`;
     }
 
     // Live status check against MAL
@@ -642,10 +666,17 @@
     async function buildAuthURL(){
         const verifier = randomString(64);
         sessionStorage.setItem('animetrack_pkce_verifier', verifier);
-        // Use PKCE "plain": challenge === verifier to match MAL app settings
+        const s4 = await getSettings();
+        const usePlain = !!s4.pkce_plain;
         const state = Math.random().toString(36).slice(2,10);
-        const authURL = `${MAL_AUTH_URL}?response_type=code&client_id=${encodeURIComponent(MAL_CLIENT_ID)}&state=${encodeURIComponent(state)}&code_challenge=${encodeURIComponent(verifier)}&code_challenge_method=plain&redirect_uri=${encodeURIComponent(MAL_REDIRECT_URI)}`;
-        return authURL;
+        if (usePlain) {
+          const authURL = `${MAL_AUTH_URL}?response_type=code&client_id=${encodeURIComponent(MAL_CLIENT_ID)}&state=${encodeURIComponent(state)}&code_challenge=${encodeURIComponent(verifier)}&code_challenge_method=plain&redirect_uri=${encodeURIComponent(MAL_REDIRECT_URI)}`;
+          return authURL;
+        } else {
+          const challenge = await pkceS256(verifier);
+          const authURL = `${MAL_AUTH_URL}?response_type=code&client_id=${encodeURIComponent(MAL_CLIENT_ID)}&state=${encodeURIComponent(state)}&code_challenge=${encodeURIComponent(challenge)}&code_challenge_method=S256&redirect_uri=${encodeURIComponent(MAL_REDIRECT_URI)}`;
+          return authURL;
+        }
     }
 
     card.querySelector('#at-auth').onclick = async () => {
@@ -692,7 +723,9 @@
             toast('OAuth exchange failed');
           }
         } catch(e) {
-          toast('OAuth failed: ' + (e && e.message || e));
+          const tmsg = 'OAuth failed: ' + (e && e.message || e);
+          toast(tmsg);
+          console.warn('[AnimeTrack] token error', tmsg);
         } finally {
           sessionStorage.removeItem('animetrack_pkce_verifier');
         }
