@@ -2,13 +2,13 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.3.10
+// @version      1.3.11
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
 // @supportURL   https://github.com/ShaharAviram1/AnimeTrack/issues
 // @updateURL    https://raw.githubusercontent.com/ShaharAviram1/AnimeTrack/main/animeTrack.meta.js
-// @downloadURL  https://raw.githubusercontent.com/ShaharAviram1/AnimeTrack/v1.3.10/AnimeTrack.user.js
+// @downloadURL  https://raw.githubusercontent.com/ShaharAviram1/AnimeTrack/v1.3.11/AnimeTrack.user.js
 // @run-at       document-start
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -64,7 +64,8 @@
   settings:'animetrack.settings',
   pkce:    'animetrack.pkce',
   oauthErr:'animetrack.oauthErr'
-  ,pkceVer:'animetrack.pkce_ver'
+  , pkceVer: 'animetrack.pkce_ver'
+  ,oauthState:'animetrack.oauthState'
   };
   const SEEDED_HOSTS = new Set([
     '9anime.to','aniwatch.to','aniwatchtv.to','gogoanime.dk','gogoanime.fi','gogoanimehd.to','hianime.to','hianime.tv','zoro.to'
@@ -181,13 +182,20 @@
       gm.xmlHttpRequest({
         method, url, headers, data,
         onload: (r) => {
+          const status = r.status;
+          const statusText = r.statusText || '';
+          const txt = r.responseText || '';
           let json = null;
-          try { json = r.responseText ? JSON.parse(r.responseText) : null; } catch {}
-          const ok = r.status >= 200 && r.status < 300;
-          if (ok) resolve(json);
-          else {
-            const msg = (json && (json.error || json.message || JSON.stringify(json))) || `HTTP ${r.status}`;
-            reject(new Error(msg));
+          try { json = txt ? JSON.parse(txt) : null; } catch {}
+          const ok = status >= 200 && status < 300;
+          if (ok) {
+            resolve(json ?? txt);
+          } else {
+            const serverMsg = (json && (json.error_description || json.message || json.error)) || txt.slice(0, 400);
+            const err = new Error(`HTTP ${status} ${statusText} :: ${serverMsg}`);
+            err.status = status;
+            err.body = txt;
+            reject(err);
           }
         },
         onerror: () => reject(new Error('Network error'))
@@ -448,6 +456,16 @@
       if (!okOrigin) return;
       const data = ev.data || {};
       if (data.source === 'animetrack-oauth' && data.code) {
+        // Verify OAuth state to prevent mismatched/tabbed flows
+        try {
+          const savedState = await gm.getValue(STORAGE.oauthState, '');
+          const incomingState = (typeof data.state === 'string') ? data.state : '';
+          if (savedState && incomingState && incomingState !== savedState) {
+            await gm.setValue(STORAGE.oauthErr, 'State mismatch');
+            toast('OAuth failed: state mismatch');
+            return;
+          }
+        } catch (_) {}
         console.debug('[AnimeTrack] Received OAuth code via postMessage');
         // Ack receipt back to oauth.html so it knows we heard it
         try {
@@ -488,6 +506,7 @@
         } finally {
           sessionStorage.removeItem('animetrack_pkce_verifier');
           try { await gm.setValue(STORAGE.pkceVer, ''); } catch(_){}
+          try { await gm.setValue(STORAGE.oauthState, ''); } catch(_){}
         }
       }
     } catch(e){ console.warn('[AnimeTrack] postMessage handler error', e); }
@@ -536,11 +555,11 @@
       <div class="row">
         <span class="sub">${authed ? 'Connected to MAL ✅' : 'Not connected ❌'}</span>
         <div style="flex:1"></div>
-        <button id="at-auth" class="${authed ? 'ghost':'primary'}">${authed ? 'Re-connect' : 'Connect MAL'}</button>
-        ${authed ? '' : '<button id="at-copy" class="ghost">Copy Auth Link</button>'}
+        <button id="at-auth" class="${authed ? 'ghost' : 'primary'}">${authed ? 'Re-connect' : 'Connect MAL'}</button>
+        ${authed ? '<button id="at-disc" class="ghost">Disconnect</button>' : '<button id="at-copy" class="ghost">Copy Auth Link</button>'}
         ${authed ? '' : '<button id="at-paste" class="ghost">Paste Code</button>'}
       </div>
-
+        
       ${!authed && lastErr ? `<div class="row"><span class="sub" style="color:#ffb3b3">Last error: ${lastErr}</span></div>` : ''}
 
       ${!onMAL ? `
@@ -672,7 +691,8 @@
         try { await gm.setValue(STORAGE.pkceVer, verifier); } catch(_) {}
         const s4 = await getSettings();
         const usePlain = !!s4.pkce_plain;
-        const state = Math.random().toString(36).slice(2,10);
+        const state = Math.random().toString(36).slice(2, 10);
+        try { await gm.setValue(STORAGE.oauthState, state); } catch(_) {}
         if (usePlain) {
           const authURL = `${MAL_AUTH_URL}?response_type=code&client_id=${encodeURIComponent(MAL_CLIENT_ID)}&state=${encodeURIComponent(state)}&code_challenge=${encodeURIComponent(verifier)}&code_challenge_method=plain&redirect_uri=${encodeURIComponent(MAL_REDIRECT_URI)}`;
           return authURL;
@@ -692,6 +712,15 @@
       } catch(e) {
         toast('Failed to build auth URL');
       }
+    };
+
+    // Wire up Disconnect button
+    const discBtn = card.querySelector('#at-disc');
+    if (discBtn) discBtn.onclick = async () => {
+      await setTokens('', '');
+      await gm.setValue(STORAGE.oauthErr, '');
+      toast('Disconnected from MAL');
+      await renderPanel();
     };
 
     const copyBtn = card.querySelector('#at-copy');
@@ -729,6 +758,7 @@
           }
         } catch(e) {
           const tmsg = 'OAuth failed: ' + (e && e.message || e);
+          await gm.setValue(STORAGE.oauthErr, String(tmsg));
           toast(tmsg);
           console.warn('[AnimeTrack] token error', tmsg);
         } finally {
