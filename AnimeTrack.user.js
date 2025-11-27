@@ -2,13 +2,13 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.4.0
+// @version      1.4.1
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
 // @supportURL   https://github.com/ShaharAviram1/AnimeTrack/issues
 // @updateURL    https://raw.githubusercontent.com/ShaharAviram1/AnimeTrack/main/animeTrack.meta.js
-// @downloadURL  https://raw.githubusercontent.com/ShaharAviram1/AnimeTrack/v1.4.0/AnimeTrack.user.js
+// @downloadURL  https://raw.githubusercontent.com/ShaharAviram1/AnimeTrack/v1.4.1/AnimeTrack.user.js
 // @run-at       document-start
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -682,32 +682,49 @@
       if (statusOut) statusOut.textContent = 'Checking…';
       try {
         const token = await ensureFreshToken();
-        // Prefer explicit fields for name
-        let me = await xhr('GET', 'https://api.myanimelist.net/v2/users/@me?fields=name', { 'Authorization': `Bearer ${token}` });
 
-        // If no name/id returned, try a fallback request including client header
-        if (!me || !(me.name || me.id)) {
-          me = await new Promise((resolve) => {
-            gm.xmlHttpRequest({
-              method: 'GET',
-              url: 'https://api.myanimelist.net/v2/users/@me?fields=name',
-              headers: { 'Authorization': `Bearer ${token}`, 'X-MAL-CLIENT-ID': MAL_CLIENT_ID },
-              onload: (r) => { try { resolve(JSON.parse(r.responseText)); } catch { resolve(null); } },
-              onerror: () => resolve(null)
-            });
+        // Helper: GET via GM.xmlHttpRequest to avoid CORS/page-context surprises
+        const gmGet = (url, headers) => new Promise((resolve) => {
+          gm.xmlHttpRequest({
+            method: 'GET',
+            url,
+            headers,
+            onload: (r) => {
+              let body = null;
+              try { body = r.responseText ? JSON.parse(r.responseText) : null; } catch {}
+              resolve({ status: r.status, body, raw: r.responseText || '' });
+            },
+            onerror: () => resolve({ status: 0, body: null, raw: '' })
           });
+        });
+
+        // Try 1: explicit fields=name (Bearer only)
+        let resp = await gmGet('https://api.myanimelist.net/v2/users/@me?fields=name', { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' });
+
+        // Try 2: without fields
+        if (!resp.body || !(resp.body.name || resp.body.id)) {
+          resp = await gmGet('https://api.myanimelist.net/v2/users/@me', { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' });
         }
+
+        // Try 3: with X-MAL-CLIENT-ID header as a nudge
+        if (!resp.body || !(resp.body.name || resp.body.id)) {
+          resp = await gmGet('https://api.myanimelist.net/v2/users/@me?fields=name', { 'Authorization': `Bearer ${token}`, 'X-MAL-CLIENT-ID': MAL_CLIENT_ID, 'Accept': 'application/json' });
+        }
+
+        const me = resp.body;
 
         if (me && (me.name || me.id)) {
           if (statusOut) statusOut.textContent = `Connected ✓ — ${me.name || ('ID ' + me.id)}`;
           await gm.setValue(STORAGE.oauthErr, '');
-        } else if (me && (me.error || me.message)) {
+        } else if (me && (me.error || me.message || me.error_description)) {
           const m = me.error_description || me.message || me.error || 'Unknown response';
-          if (statusOut) statusOut.textContent = 'Not connected: ' + m;
+          if (statusOut) statusOut.textContent = `Not connected: ${m}`;
           await gm.setValue(STORAGE.oauthErr, 'OAuth failed: ' + m);
         } else {
-          if (statusOut) statusOut.textContent = 'Connected ✓';
-          await gm.setValue(STORAGE.oauthErr, '');
+          // Show a short diagnostic snippet to help debug quickly
+          const snippet = (resp && (resp.raw || JSON.stringify(resp.body))) ? String(resp.raw || JSON.stringify(resp.body)).slice(0, 160) : `HTTP ${resp?.status || '?'} (no body)`;
+          if (statusOut) statusOut.textContent = `Connected? No name/ID returned. Resp: ${snippet}`;
+          await gm.setValue(STORAGE.oauthErr, 'OAuth: @me returned no name/ID');
         }
 
         await renderPanel();
