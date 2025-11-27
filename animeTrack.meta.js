@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
-// @version      1.4.4
+// @version      1.4.5
 // @description  Fast anime scrobbler for MAL
-// @downloadURL  https://raw.githubusercontent.com/ShaharAviram1/AnimeTrack/v1.4.4/AnimeTrack.user.js
+// @downloadURL  https://anime-track-oauth.shaharaviram.workers.dev/download
 // ==/UserScript==
