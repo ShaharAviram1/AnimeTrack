@@ -75,7 +75,8 @@ export default {
       });
     }
 
-    // Dynamic downloader: always serves the user.js pointed by the latest meta on main
+    // Dynamic downloader: always serves the user.js pointed by the latest meta on main,
+    // and avoids recursion if meta's @downloadURL points back to this Worker.
     if (url.pathname === '/download') {
       if (req.method !== 'GET' && req.method !== 'HEAD') {
         return new Response('Method Not Allowed', { status: 405, headers: baseHeaders });
@@ -89,21 +90,106 @@ export default {
       });
       const metaTxt = await metaResp.text();
 
-      // 2) Extract @downloadURL from meta
-      const m = metaTxt.match(/@downloadURL\s+([^\s]+)/);
-      if (!m) {
+      // 2) Extract @downloadURL and @version from meta
+      const mUrl = metaTxt.match(/@downloadURL\s+([^\s]+)/);
+      const mVer = metaTxt.match(/@version\s+([0-9]+\.[0-9]+\.[0-9]+)/);
+      if (!mUrl) {
         return new Response('downloadURL not found in meta', { status: 500, headers: baseHeaders });
       }
-      const target = m[1];
+      const advertised = mUrl[1];
+      const version = mVer ? mVer[1] : '';
 
-      // 3) Fetch the actual script at that URL and stream it back
+      // 3) Resolve target: if advertised URL points back to this Worker, construct GitHub tag URL
+      const selfOrigin = `${url.protocol}//${url.host}`; // e.g., https://anime-track-oauth.shaharaviram.workers.dev
+      let target = advertised;
+      if (advertised.startsWith(selfOrigin)) {
+        if (version) {
+          target = `https://raw.githubusercontent.com/ShaharAviram1/AnimeTrack/v${version}/AnimeTrack.user.js`;
+        } else {
+          return new Response('Refusing recursive /download without version in meta', { status: 500, headers: baseHeaders });
+        }
+      }
+
+      // 4) Fetch the actual script at the resolved URL and stream it back
       const scriptResp = await fetch(target, {
         cf: { cacheTtl: 0, cacheEverything: false },
         headers: { 'Cache-Control': 'no-cache' }
       });
 
       if (req.method === 'HEAD') {
-        // Return only headers
+        const len = scriptResp.headers.get('content-length') || '0';
+        return new Response('', {
+          status: 200,
+          headers: {
+            ...baseHeaders,
+            'Content-Type': 'application/javascript; charset=utf-8',
+            'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+            'Pragma': 'no-cache',
+            'Expires': '0',
+            'X-Content-Type-Options': 'nosniff',
+            'Content-Length': len,
+            'Content-Disposition': 'inline; filename="AnimeTrack.user.js"'
+          }
+        });
+      } else {
+        const txt = await scriptResp.text();
+        const len = String(new TextEncoder().encode(txt).length);
+        return new Response(txt, {
+          status: 200,
+          headers: {
+            ...baseHeaders,
+            'Content-Type': 'application/javascript; charset=utf-8',
+            'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+            'Pragma': 'no-cache',
+            'Expires': '0',
+            'X-Content-Type-Options': 'nosniff',
+            'Content-Length': len,
+            'Content-Disposition': 'inline; filename="AnimeTrack.user.js"'
+          }
+        });
+      }
+    }
+
+    // Stable filename path for download (some managers require .user.js suffix)
+    if (url.pathname === '/AnimeTrack.user.js') {
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        return new Response('Method Not Allowed', { status: 405, headers: baseHeaders });
+      }
+
+      // 1) Fetch latest meta from main
+      const metaUrl = 'https://raw.githubusercontent.com/ShaharAviram1/AnimeTrack/main/animeTrack.meta.js';
+      const metaResp = await fetch(metaUrl, {
+        cf: { cacheTtl: 0, cacheEverything: false },
+        headers: { 'Cache-Control': 'no-cache' }
+      });
+      const metaTxt = await metaResp.text();
+
+      // 2) Extract @downloadURL and @version
+      const mUrl = metaTxt.match(/@downloadURL\s+([^\s]+)/);
+      const mVer = metaTxt.match(/@version\s+([0-9]+\.[0-9]+\.[0-9]+)/);
+      if (!mUrl) {
+        return new Response('downloadURL not found in meta', { status: 500, headers: baseHeaders });
+      }
+      const advertised = mUrl[1];
+      const version = mVer ? mVer[1] : '';
+
+      // 3) Resolve target; avoid recursion back to this Worker
+      const selfOrigin = `${url.protocol}//${url.host}`;
+      let target = advertised;
+      if (advertised.startsWith(selfOrigin)) {
+        if (version) {
+          target = `https://raw.githubusercontent.com/ShaharAviram1/AnimeTrack/v${version}/AnimeTrack.user.js`;
+        } else {
+          return new Response('Refusing recursive /AnimeTrack.user.js without version in meta', { status: 500, headers: baseHeaders });
+        }
+      }
+
+      const scriptResp = await fetch(target, {
+        cf: { cacheTtl: 0, cacheEverything: false },
+        headers: { 'Cache-Control': 'no-cache' }
+      });
+
+      if (req.method === 'HEAD') {
         const len = scriptResp.headers.get('content-length') || '0';
         return new Response('', {
           status: 200,
