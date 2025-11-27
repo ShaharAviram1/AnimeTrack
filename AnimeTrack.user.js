@@ -50,7 +50,7 @@
   })();
 
   // ---- Constants ----
-  let MAL_CLIENT_ID = '10093a3f9f0174b6b5577c40e9accdae';
+  let MAL_CLIENT_ID = '8cdc30a4b5c47b9aebe8372b6c5883ee';
   let MAL_REDIRECT_URI = 'https://shaharaviram1.github.io/AnimeTrack/oauth.html';
   const MAL_AUTH_URL  = 'https://myanimelist.net/v1/oauth2/authorize';
   const MAL_TOKEN_URL = 'https://myanimelist.net/v1/oauth2/token';
@@ -455,7 +455,8 @@
         } catch(_) {}
         await getSettings(); // ensure MAL_CLIENT_ID / MAL_REDIRECT_URI loaded
         const code = String(data.code);
-        const verifier = sessionStorage.getItem('animetrack_pkce_verifier') || code;
+        const verifier = sessionStorage.getItem('animetrack_pkce_verifier');
+        if (!verifier) { throw new Error('Missing PKCE verifier'); }
         const payload = encodeForm({ client_id: MAL_CLIENT_ID, grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: MAL_REDIRECT_URI });
         try {
           const res = await xhr('POST', MAL_TOKEN_URL, { 'Content-Type': 'application/x-www-form-urlencoded' }, payload);
@@ -491,7 +492,6 @@
   // ---- Settings / Panel ----
   async function getSettings(){
     const s = await getJSON(STORAGE.settings, {});
-    if (s.client_id) MAL_CLIENT_ID = s.client_id;
     if (s.redirect_uri) MAL_REDIRECT_URI = s.redirect_uri;
     return { client_id: MAL_CLIENT_ID, redirect_uri: MAL_REDIRECT_URI };
   }
@@ -499,7 +499,6 @@
     const cur = await getJSON(STORAGE.settings, {});
     const nx = Object.assign({}, cur, obj||{});
     await setJSON(STORAGE.settings, nx);
-    if (nx.client_id) MAL_CLIENT_ID = nx.client_id;
     if (nx.redirect_uri) MAL_REDIRECT_URI = nx.redirect_uri;
   }
 
@@ -592,12 +591,11 @@
     }
 
     const s = await getSettings();
-    card.querySelector('#at-client').value = s.client_id || '';
+    card.querySelector('#at-client').value = MAL_CLIENT_ID;
+    card.querySelector('#at-client').disabled = true;
     card.querySelector('#at-redirect').value = s.redirect_uri || 'https://shaharaviram1.github.io/AnimeTrack/oauth.html';
     card.querySelector('#at-save-client').onclick = async () => {
-      const v = card.querySelector('#at-client').value.trim();
-      await saveSettings({ client_id: v });
-      toast('Saved Client ID');
+      toast('Client ID is fixed in the script.');
     };
     card.querySelector('#at-save-redirect').onclick = async () => {
       const v = card.querySelector('#at-redirect').value.trim();
@@ -606,12 +604,12 @@
     };
 
     async function buildAuthURL(){
-      const verifier = randomString(64);
-      sessionStorage.setItem('animetrack_pkce_verifier', verifier);
-      const challenge = await pkceS256(verifier);
-      const state = Math.random().toString(36).slice(2,10);
-      const authURL = `${MAL_AUTH_URL}?response_type=code&client_id=${encodeURIComponent(MAL_CLIENT_ID)}&state=${encodeURIComponent(state)}&code_challenge=${encodeURIComponent(challenge)}&code_challenge_method=S256&redirect_uri=${encodeURIComponent(MAL_REDIRECT_URI)}`;
-      return authURL;
+        const verifier = randomString(64);
+        sessionStorage.setItem('animetrack_pkce_verifier', verifier);
+        // Use PKCE "plain": challenge === verifier to match MAL app settings
+        const state = Math.random().toString(36).slice(2,10);
+        const authURL = `${MAL_AUTH_URL}?response_type=code&client_id=${encodeURIComponent(MAL_CLIENT_ID)}&state=${encodeURIComponent(state)}&code_challenge=${encodeURIComponent(verifier)}&code_challenge_method=plain&redirect_uri=${encodeURIComponent(MAL_REDIRECT_URI)}`;
+        return authURL;
     }
 
     card.querySelector('#at-auth').onclick = async () => {
@@ -645,7 +643,8 @@
         if (!code) return;
         await getSettings();
         try {
-          const verifier = sessionStorage.getItem('animetrack_pkce_verifier') || code;
+            const verifier = sessionStorage.getItem('animetrack_pkce_verifier');
+            if (!verifier) { toast('Missing PKCE verifier — click Connect MAL to generate it, then paste.'); return; }
           const payload = encodeForm({ client_id: MAL_CLIENT_ID, grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: MAL_REDIRECT_URI });
           const res = await xhr('POST', MAL_TOKEN_URL, { 'Content-Type': 'application/x-www-form-urlencoded' }, payload);
           if (res && res.access_token) {
