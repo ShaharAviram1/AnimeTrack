@@ -2,13 +2,13 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.3.12
+// @version      1.4.0
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
 // @supportURL   https://github.com/ShaharAviram1/AnimeTrack/issues
 // @updateURL    https://raw.githubusercontent.com/ShaharAviram1/AnimeTrack/main/animeTrack.meta.js
-// @downloadURL  https://raw.githubusercontent.com/ShaharAviram1/AnimeTrack/v1.3.12/AnimeTrack.user.js
+// @downloadURL  https://raw.githubusercontent.com/ShaharAviram1/AnimeTrack/v1.4.0/AnimeTrack.user.js
 // @run-at       document-start
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -682,13 +682,34 @@
       if (statusOut) statusOut.textContent = 'Checking…';
       try {
         const token = await ensureFreshToken();
-        const me = await xhr('GET', 'https://api.myanimelist.net/v2/users/@me', { 'Authorization': `Bearer ${token}` });
+        // Prefer explicit fields for name
+        let me = await xhr('GET', 'https://api.myanimelist.net/v2/users/@me?fields=name', { 'Authorization': `Bearer ${token}` });
+
+        // If no name/id returned, try a fallback request including client header
+        if (!me || !(me.name || me.id)) {
+          me = await new Promise((resolve) => {
+            gm.xmlHttpRequest({
+              method: 'GET',
+              url: 'https://api.myanimelist.net/v2/users/@me?fields=name',
+              headers: { 'Authorization': `Bearer ${token}`, 'X-MAL-CLIENT-ID': MAL_CLIENT_ID },
+              onload: (r) => { try { resolve(JSON.parse(r.responseText)); } catch { resolve(null); } },
+              onerror: () => resolve(null)
+            });
+          });
+        }
+
         if (me && (me.name || me.id)) {
           if (statusOut) statusOut.textContent = `Connected ✓ — ${me.name || ('ID ' + me.id)}`;
+          await gm.setValue(STORAGE.oauthErr, '');
+        } else if (me && (me.error || me.message)) {
+          const m = me.error_description || me.message || me.error || 'Unknown response';
+          if (statusOut) statusOut.textContent = 'Not connected: ' + m;
+          await gm.setValue(STORAGE.oauthErr, 'OAuth failed: ' + m);
         } else {
           if (statusOut) statusOut.textContent = 'Connected ✓';
+          await gm.setValue(STORAGE.oauthErr, '');
         }
-        await gm.setValue(STORAGE.oauthErr, '');
+
         await renderPanel();
       } catch (e) {
         const msg = (e && e.message) ? e.message : String(e);
