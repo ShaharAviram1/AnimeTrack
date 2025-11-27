@@ -2,13 +2,13 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.3.9
+// @version      1.3.10
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
 // @supportURL   https://github.com/ShaharAviram1/AnimeTrack/issues
 // @updateURL    https://raw.githubusercontent.com/ShaharAviram1/AnimeTrack/main/animeTrack.meta.js
-// @downloadURL  https://raw.githubusercontent.com/ShaharAviram1/AnimeTrack/v1.3.9/AnimeTrack.user.js
+// @downloadURL  https://raw.githubusercontent.com/ShaharAviram1/AnimeTrack/v1.3.10/AnimeTrack.user.js
 // @run-at       document-start
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -64,6 +64,7 @@
   settings:'animetrack.settings',
   pkce:    'animetrack.pkce',
   oauthErr:'animetrack.oauthErr'
+  ,pkceVer:'animetrack.pkce_ver'
   };
   const SEEDED_HOSTS = new Set([
     '9anime.to','aniwatch.to','aniwatchtv.to','gogoanime.dk','gogoanime.fi','gogoanimehd.to','hianime.to','hianime.tv','zoro.to'
@@ -456,7 +457,8 @@
         } catch(_) {}
         await getSettings(); // ensure MAL_CLIENT_ID / MAL_REDIRECT_URI loaded
         const code = String(data.code);
-        const verifier = sessionStorage.getItem('animetrack_pkce_verifier');
+        let verifier = sessionStorage.getItem('animetrack_pkce_verifier');
+        if (!verifier) { try { verifier = await gm.getValue(STORAGE.pkceVer, ''); } catch(_) { verifier = ''; } }
         if (!verifier) { throw new Error('Missing PKCE verifier'); }
         const payload = encodeForm({ client_id: MAL_CLIENT_ID, grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: MAL_REDIRECT_URI });
         try {
@@ -485,6 +487,7 @@
           console.warn('[AnimeTrack] token error', tmsg);
         } finally {
           sessionStorage.removeItem('animetrack_pkce_verifier');
+          try { await gm.setValue(STORAGE.pkceVer, ''); } catch(_){}
         }
       }
     } catch(e){ console.warn('[AnimeTrack] postMessage handler error', e); }
@@ -666,6 +669,7 @@
     async function buildAuthURL(){
         const verifier = randomString(64);
         sessionStorage.setItem('animetrack_pkce_verifier', verifier);
+        try { await gm.setValue(STORAGE.pkceVer, verifier); } catch(_) {}
         const s4 = await getSettings();
         const usePlain = !!s4.pkce_plain;
         const state = Math.random().toString(36).slice(2,10);
@@ -710,7 +714,8 @@
         if (!code) return;
         await getSettings();
         try {
-            const verifier = sessionStorage.getItem('animetrack_pkce_verifier');
+            let verifier = sessionStorage.getItem('animetrack_pkce_verifier');
+            if (!verifier) { try { verifier = await gm.getValue(STORAGE.pkceVer, ''); } catch(_) { verifier = ''; } }
             if (!verifier) { toast('Missing PKCE verifier — click Connect MAL to generate it, then paste.'); return; }
           const payload = encodeForm({ client_id: MAL_CLIENT_ID, grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: MAL_REDIRECT_URI });
           const res = await xhr('POST', MAL_TOKEN_URL, { 'Content-Type': 'application/x-www-form-urlencoded' }, payload);
@@ -728,6 +733,7 @@
           console.warn('[AnimeTrack] token error', tmsg);
         } finally {
           sessionStorage.removeItem('animetrack_pkce_verifier');
+          try { await gm.setValue(STORAGE.pkceVer, ''); } catch(_){ }
         }
       };
     }
