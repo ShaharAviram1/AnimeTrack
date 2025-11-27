@@ -2,13 +2,13 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.3.11
+// @version      1.3.12
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
 // @supportURL   https://github.com/ShaharAviram1/AnimeTrack/issues
 // @updateURL    https://raw.githubusercontent.com/ShaharAviram1/AnimeTrack/main/animeTrack.meta.js
-// @downloadURL  https://raw.githubusercontent.com/ShaharAviram1/AnimeTrack/v1.3.11/AnimeTrack.user.js
+// @downloadURL  https://raw.githubusercontent.com/ShaharAviram1/AnimeTrack/v1.3.12/AnimeTrack.user.js
 // @run-at       document-start
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -20,6 +20,8 @@
 // @grant        GM.registerMenuCommand
 // @connect      myanimelist.net
 // @connect      api.myanimelist.net
+// @connect      shaharaviram.workers.dev
+// @connect      anime-track-oauth.shaharaviram.workers.dev
 // @match        *://*/*
 // @match        *://myanimelist.net/*
 // @match        *://hianime.to/*
@@ -54,7 +56,8 @@
   let MAL_REDIRECT_URI = 'https://shaharaviram1.github.io/AnimeTrack/oauth.html';
   const MAL_AUTH_URL  = 'https://myanimelist.net/v1/oauth2/authorize';
   const MAL_TOKEN_URL = 'https://myanimelist.net/v1/oauth2/token';
-  const MAL_SEARCH    = 'https://api.myanimelist.net/v2/anime';
+  const MAL_SEARCH = 'https://api.myanimelist.net/v2/anime';
+  const WORKER_URL   = 'https://anime-track-oauth.shaharaviram.workers.dev';
   const STORAGE = {
   access: 'animetrack.malToken',
   refresh: 'animetrack.malRefresh',
@@ -66,6 +69,7 @@
   oauthErr:'animetrack.oauthErr'
   , pkceVer: 'animetrack.pkce_ver'
   ,oauthState:'animetrack.oauthState'
+  ,expires:'animetrack.expires'
   };
   const SEEDED_HOSTS = new Set([
     '9anime.to','aniwatch.to','aniwatchtv.to','gogoanime.dk','gogoanime.fi','gogoanimehd.to','hianime.to','hianime.tv','zoro.to'
@@ -173,7 +177,15 @@
   async function setJSON(key, val){ try { return gm.setValue(key, JSON.stringify(val)); } catch { return; } }
   async function getToken(){ return (await gm.getValue(STORAGE.access,'')) || ''; }
   async function getRefresh(){ return (await gm.getValue(STORAGE.refresh,'')) || ''; }
-  async function setTokens(access, refresh){ await gm.setValue(STORAGE.access, access||''); if (refresh!==undefined) await gm.setValue(STORAGE.refresh, refresh||''); }
+  async function getExpiry(){ const v = await gm.getValue(STORAGE.expires,'0'); const n = parseInt(v,10)||0; return n; }
+  async function setTokens(access, refresh, expiresIn){
+    await gm.setValue(STORAGE.access, access||'');
+    if (refresh!==undefined) await gm.setValue(STORAGE.refresh, refresh||'');
+    if (typeof expiresIn === 'number') {
+      const exp = Date.now() + Math.max(0, (expiresIn|0)) * 1000 - 60000; // minus 60s buffer
+      await gm.setValue(STORAGE.expires, String(exp));
+    }
+  }
 
   // ---- Network helpers ----
   function xhr(method, url, headers={}, data=null){
@@ -316,13 +328,14 @@
   // ---- MAL API wrappers ----
   async function ensureFreshToken(){
     const access = await getToken();
-    if (access) return access;
+    const exp = await getExpiry();
+    if (access && exp && Date.now() < exp) return access;
     const refresh = await getRefresh();
     if (!refresh) throw new Error('Not authenticated');
-    const payload = encodeForm({ client_id: MAL_CLIENT_ID, grant_type: 'refresh_token', refresh_token: refresh });
-    const res = await xhr('POST', MAL_TOKEN_URL, { 'Content-Type': 'application/x-www-form-urlencoded' }, payload);
+    const payload = { refresh_token: refresh };
+    const res = await xhr('POST', `${WORKER_URL}/refresh`, { 'Content-Type': 'application/json' }, JSON.stringify(payload));
     if (!res || !res.access_token) throw new Error('Refresh failed');
-    await setTokens(res.access_token, res.refresh_token || '');
+    await setTokens(res.access_token, res.refresh_token || '', res.expires_in);
     return res.access_token;
   }
   async function malSearch(query){
@@ -478,11 +491,11 @@
         let verifier = sessionStorage.getItem('animetrack_pkce_verifier');
         if (!verifier) { try { verifier = await gm.getValue(STORAGE.pkceVer, ''); } catch(_) { verifier = ''; } }
         if (!verifier) { throw new Error('Missing PKCE verifier'); }
-        const payload = encodeForm({ client_id: MAL_CLIENT_ID, grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: MAL_REDIRECT_URI });
+        const payload = { code, code_verifier: verifier, redirect_uri: MAL_REDIRECT_URI };
         try {
-          const res = await xhr('POST', MAL_TOKEN_URL, { 'Content-Type': 'application/x-www-form-urlencoded' }, payload);
+          const res = await xhr('POST', `${WORKER_URL}/token`, { 'Content-Type': 'application/json' }, JSON.stringify(payload));
           if (res && res.access_token) {
-            await setTokens(res.access_token, res.refresh_token || '');
+            await setTokens(res.access_token, res.refresh_token || '', res.expires_in);
             await gm.setValue(STORAGE.oauthErr, '');
             toast('Connected to MAL');
             console.debug('[AnimeTrack] OAuth success');
@@ -746,10 +759,10 @@
             let verifier = sessionStorage.getItem('animetrack_pkce_verifier');
             if (!verifier) { try { verifier = await gm.getValue(STORAGE.pkceVer, ''); } catch(_) { verifier = ''; } }
             if (!verifier) { toast('Missing PKCE verifier — click Connect MAL to generate it, then paste.'); return; }
-          const payload = encodeForm({ client_id: MAL_CLIENT_ID, grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: MAL_REDIRECT_URI });
-          const res = await xhr('POST', MAL_TOKEN_URL, { 'Content-Type': 'application/x-www-form-urlencoded' }, payload);
+            const payload = { code, code_verifier: verifier, redirect_uri: MAL_REDIRECT_URI };
+            const res = await xhr('POST', `${WORKER_URL}/token`, { 'Content-Type': 'application/json' }, JSON.stringify(payload));
           if (res && res.access_token) {
-            await setTokens(res.access_token, res.refresh_token || '');
+            await setTokens(res.access_token, res.refresh_token || '', res.expires_in);
             await gm.setValue(STORAGE.oauthErr, '');
             toast('Connected to MAL');
             await renderPanel();
