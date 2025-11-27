@@ -2,13 +2,13 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.3.6
+// @version      1.3.7
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
 // @supportURL   https://github.com/ShaharAviram1/AnimeTrack/issues
 // @updateURL    https://cdn.jsdelivr.net/gh/ShaharAviram1/AnimeTrack@latest/animeTrack.meta.js
-// @downloadURL  https://cdn.jsdelivr.net/gh/ShaharAviram1/AnimeTrack@v1.3.6/AnimeTrack.user.js
+// @downloadURL  https://cdn.jsdelivr.net/gh/ShaharAviram1/AnimeTrack@v1.3.7/AnimeTrack.user.js
 // @run-at       document-start
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -569,7 +569,7 @@
       <div class="row">
         <details>
           <summary class="sub">Settings</summary>
-          <div class="sub hint">You can set your own MAL Client ID and Redirect URI.</div>
+          <div class="sub hint">Client ID is fixed in the script. You can change the Redirect URI if needed.</div>
           <div class="row" style="margin-top:8px">
             <input id="at-client" placeholder="MAL Client ID" style="flex:1">
             <button id="at-save-client" class="ghost">Save</button>
@@ -579,6 +579,13 @@
             <button id="at-save-redirect" class="ghost">Save</button>
           </div>
         </details>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="at-status" class="ghost">Check MAL status</button>
+        <span class="sub" id="at-status-out"></span>
+      </div>
+      <div class="row">
+        <span class="hint" id="at-diag"></span>
       </div>
     `;
 
@@ -601,6 +608,35 @@
       const v = card.querySelector('#at-redirect').value.trim();
       await saveSettings({ redirect_uri: v || 'https://shaharaviram1.github.io/AnimeTrack/oauth.html' });
       toast('Saved Redirect URI');
+    };
+
+    // Diagnostics line (shows effective client & redirect)
+    const diag = card.querySelector('#at-diag');
+    if (diag) {
+      diag.textContent = `Diag → client ${MAL_CLIENT_ID.slice(0,8)}…  redirect ${MAL_REDIRECT_URI}`;
+    }
+
+    // Live status check against MAL
+    const statusBtn = card.querySelector('#at-status');
+    const statusOut = card.querySelector('#at-status-out');
+    if (statusBtn) statusBtn.onclick = async () => {
+      if (statusOut) statusOut.textContent = 'Checking…';
+      try {
+        const token = await ensureFreshToken();
+        const me = await xhr('GET', 'https://api.myanimelist.net/v2/users/@me', { 'Authorization': `Bearer ${token}` });
+        if (me && (me.name || me.id)) {
+          if (statusOut) statusOut.textContent = `Connected ✓ — ${me.name || ('ID ' + me.id)}`;
+        } else {
+          if (statusOut) statusOut.textContent = 'Connected ✓';
+        }
+        await gm.setValue(STORAGE.oauthErr, '');
+        await renderPanel();
+      } catch (e) {
+        const msg = (e && e.message) ? e.message : String(e);
+        if (statusOut) statusOut.textContent = 'Not connected: ' + msg;
+        await gm.setValue(STORAGE.oauthErr, 'OAuth failed: ' + msg);
+        await renderPanel();
+      }
     };
 
     async function buildAuthURL(){
