@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.4.9
+// @version      1.4.10
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -82,6 +82,24 @@
   function norm(s){ return (s||'').replace(/\s+/g,' ').trim(); }
   function encodeForm(obj){ return Object.keys(obj).map(k => `${encodeURIComponent(k)}=${encodeURIComponent(obj[k])}`).join('&'); }
   function titleCase(s){ return (s||'').split(' ').map(w => w ? (w[0].toUpperCase()+w.slice(1)) : w).join(' '); }
+
+  function _decSlug(s){ try { return decodeURIComponent(s); } catch { return s || ''; } }
+  // Extract a canonical series slug from a pathname
+  function extractSeriesSlugFromPath(pathname){
+    const parts = (pathname||'').split('/').filter(Boolean);
+    const prefixes = new Set(['watch','anime','series','stream','show']);
+    let slug = parts.length > 1 && prefixes.has((parts[0]||'').toLowerCase()) ? parts[1] : (parts[0] || '');
+    slug = _decSlug(String(slug).toLowerCase());
+    // strip episode tails like -episode-12, -ep-12, -e12, -season-2, -s2
+    slug = slug.replace(/-(?:episode|ep|e|season|s)[-_]?\d+.*$/i, '');
+    // strip trailing numeric site id like -19908 (3+ digits to avoid s2)
+    slug = slug.replace(/-\d{3,}$/i, '');
+    // remove common junk tokens at end
+    slug = slug.replace(/-(?:1080p|720p|sub|dub|watch|full|free)$/gi, '');
+    // collapse dashes and trim
+    slug = slug.replace(/-+/g,'-').replace(/^-|-$/g,'');
+    return slug;
+  }
 
   // PKCE helpers (S256)
   function b64url(buf){
@@ -548,30 +566,25 @@
   }
 
   function getSeriesKey(){
-    const {host} = location;
-    // Prefer canonical slug from og:url if present
-    const og = (function(){ try { return qs('meta[property=\"og:url\"]')?.content || qs('meta[name=\"twitter:url\"]')?.content; } catch { return ''; } })();
+    const host = location.host.replace(/^www\./i,'').toLowerCase();
+    // 1) Prefer canonical from og:url if available
+    const og = (function(){ try { return qs('meta[property="og:url"]')?.content || qs('meta[name="twitter:url"]')?.content; } catch { return ''; } })();
+    let slug = '';
     if (og) {
       try {
         const u = new URL(og);
-        const parts = u.pathname.split('/').filter(Boolean);
-        let slug = parts[1] || parts[0] || '';
-        const prefixes = new Set(['watch','anime','series','stream','show']);
-        if (slug && prefixes.has((parts[0]||'').toLowerCase()) && parts[1]) slug = parts[1];
-        slug = slug.replace(/-episode-?\d+.*$/i, '').replace(/-ep-?\d+.*$/i, '').replace(/-\d+$/i, '');
-        return host + '|' + slug;
+        slug = extractSeriesSlugFromPath(u.pathname);
       } catch {}
     }
-    // Fallback to current pathname
-    const parts = location.pathname.split('/').filter(Boolean);
-    const prefixes = new Set(['watch','anime','series','stream','show']);
-    let slug = parts[0] || '';
-    if (slug && prefixes.has(slug.toLowerCase()) && parts[1]) slug = parts[1];
-    slug = slug.replace(/-episode-?\d+.*$/i, '').replace(/-ep-?\d+.*$/i, '').replace(/-\d+$/i, '');
+    // 2) Fallback to current path
+    if (!slug) slug = extractSeriesSlugFromPath(location.pathname);
+
+    // 3) Provider-specific tail cleanup (e.g., HiAnime numeric tails)
     const provider = getProviderForHost(host);
-    if (provider) {
-      slug = slug.replace(/-\d+$/, ''); // remove hianime numeric tail
-    }
+    if (provider) slug = slug.replace(/-\d{3,}$/,'');
+
+    // 4) Final normalization
+    slug = (slug||'').toLowerCase();
     return host + '|' + slug;
   }
   function pickBestMatch(data, guess){
