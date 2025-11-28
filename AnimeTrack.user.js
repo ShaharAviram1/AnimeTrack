@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.4.8
+// @version      1.4.9
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -216,6 +216,121 @@
   }
 
   // ---- Title/Episode heuristics ----
+  const PROVIDERS = {
+    hianime: {
+      domains: ['hianime.to', 'hianime.tv', 'aniwave.to', 'aniwave.se', 'aniwatch.to', 'aniwatchtv.to'],
+      detectTitle(doc, loc) {
+        // Prefer OG URL → slug
+        const og = doc.querySelector('meta[property="og:url"]')?.content || '';
+        if (og) {
+          try {
+            const u = new URL(og);
+            const parts = u.pathname.split('/').filter(Boolean);
+            let slug = parts.includes('watch') ? parts[parts.indexOf('watch') + 1] : parts[0];
+            if (slug) {
+              slug = slug
+                .replace(/-episode-?\d+.*/i, '')
+                .replace(/-ep-?\d+.*/i, '')
+                .replace(/-\d+$/i, '')
+                .replace(/[-_]+/g, ' ')
+                .trim();
+              return slug;
+            }
+          } catch(e){}
+        }
+
+        // JSON-LD fallback
+        const ld = (() => {
+          try {
+            const nodes = doc.querySelectorAll('script[type="application/ld+json"]');
+            for (const n of nodes) {
+              const data = JSON.parse(n.textContent);
+              const arr = Array.isArray(data)? data : [data];
+              for (const obj of arr) {
+                const nm = obj?.name || obj?.headline;
+                if (nm) return nm;
+              }
+            }
+          } catch(e){}
+          return null;
+        })();
+        if (ld) return ld;
+
+        // UI fallback
+        return (
+          doc.querySelector('.film-name')?.textContent ||
+          doc.querySelector('.anisc-detail .name')?.textContent ||
+          doc.querySelector('h1')?.textContent ||
+          doc.title ||
+          ''
+        );
+      },
+
+      detectEpisode(doc, loc) {
+        const currentEpFromURL = (() => {
+          const m = loc.href.match(/[?&]ep=([0-9]+)/i);
+          return m ? m[1] : null;
+        })();
+
+        // Active element first
+        const activeSelectors = [
+          '.ep-item.active',
+          '.ep-item a.active',
+          '.list-episode a.active',
+          '.ss-list a.active'
+        ];
+        for (const sel of activeSelectors) {
+          const el = doc.querySelector(sel);
+          if (!el) continue;
+
+          const data = el.getAttribute('data-number') ||
+                       el.getAttribute('data-ep') ||
+                       el.getAttribute('data-episode');
+          if (data && /^\d+$/.test(data)) return parseInt(data);
+
+          const t = el.textContent;
+          const m = t?.match(/(\d{1,4})/);
+          if (m) return parseInt(m[1]);
+        }
+
+        // If URL has ep=xxxx, match anchor with same internal id
+        if (currentEpFromURL) {
+          const link = [...doc.querySelectorAll('.ep-item a, a.ep-item, a')].find(a =>
+            a.href.includes(`ep=${currentEpFromURL}`) ||
+            a.getAttribute('data-id') === currentEpFromURL
+          );
+          if (link) {
+            const num = link.getAttribute('data-number') ||
+                        link.getAttribute('data-ep') ||
+                        link.textContent.match(/\d+/)?.[0];
+            if (num) return parseInt(num);
+          }
+        }
+
+        // Fallback: highest visible episode number in list
+        const nums = [...doc.querySelectorAll('.ep-item, .ep-item a, .list-episode a')]
+          .map(x => {
+            const v = x.getAttribute('data-number') ||
+                      x.getAttribute('data-ep') ||
+                      x.textContent;
+            const m = v?.match(/\\d+/);
+            return m ? parseInt(m[0]) : null;
+          })
+          .filter(Boolean);
+        if (nums.length) return Math.max(...nums);
+
+        return null;
+      }
+    }
+  };
+
+  function getProviderForHost(host) {
+    host = host.toLowerCase();
+    for (const key in PROVIDERS) {
+      if (PROVIDERS[key].domains.includes(host)) return PROVIDERS[key];
+    }
+    return null;
+  }
   function cleanTitle(t){
     t = norm(t);
     if (!t) return t;
@@ -262,10 +377,18 @@
     return null;
   }
   function guessTitle(){
+    const provider = getProviderForHost(location.hostname);
+    if (provider && provider.detectTitle) {
+      const t = provider.detectTitle(document, location);
+      if (t && t.trim().length > 1) return cleanTitle(t);
+    }
+
+    // fallback to existing logic
     const ogSlug = fromOgUrlSlug();
     if (ogSlug) return titleCase(ogSlug);
     const ld = parseJSONLDName();
     if (ld) return ld;
+
     const cand = [
       qs('.film-name')?.textContent,
       qs('.anisc-detail .name')?.textContent,
@@ -279,8 +402,13 @@
       qs('header h1')?.textContent,
       qs('.title')?.textContent,
       document.title
-    ].filter(Boolean).map(cleanTitle).map(norm).filter(Boolean);
-    for (const c of cand) { if (c && c.length > 1) return c; }
+    ]
+    .filter(Boolean)
+    .map(cleanTitle)
+    .filter(Boolean);
+
+    if (cand.length) return cand[0];
+
     const parts = location.pathname.split('/').filter(Boolean);
     const prefixes = new Set(['watch','anime','series','stream','show']);
     let slug = parts[0] || '';
@@ -299,42 +427,16 @@
     return null;
   }
   function guessEpisode(){
-    const epQ = parseEpFromUrlString(location.href);
-    if (epQ) return epQ;
-    const og = qs('meta[property="og:url"]')?.content || qs('meta[name="twitter:url"]')?.content;
-    const epOg = parseEpFromUrlString(og||'');
-    if (epOg) return epOg;
+    const provider = getProviderForHost(location.hostname);
+    if (provider && provider.detectEpisode) {
+      const ep = provider.detectEpisode(document, location);
+      if (ep != null) return ep;
+    }
 
-    const hiActive = qs('a.ep-item.active, .ep-item.active a, .list-episode a.active, .detail-infor-content .active.episode, .ss-list a.active');
-    if (hiActive){
-      const numAttr = hiActive.getAttribute('data-number') || hiActive.dataset?.number;
-      if (/^\d+$/.test(numAttr||'')) return parseInt(numAttr,10);
-      const href = hiActive.getAttribute('href') || '';
-      const viaHref = parseEpFromUrlString(href);
-      if (viaHref) return viaHref;
-      const t = hiActive.textContent || '';
-      const m = t.match(/(\d{1,4})/);
-      if (m) return parseInt(m[1],10);
-    }
-    const act = Array.from(document.querySelectorAll('[aria-current="page"],[aria-current="true"],.active,.current'));
-    for (const el of act) {
-      const t = el.textContent || '';
-      const m = t.match(/\b(?:ep|episode)?\s*(\d{1,4})\b/i);
-      if (m) return parseInt(m[1],10);
-    }
-    // Extra selectors common on hianime/9anime/zoro variants
-    const epAttr = document.querySelector('[data-ep], [data-episode], [data-number]');
-    if (epAttr) {
-      const v = epAttr.getAttribute('data-ep') || epAttr.getAttribute('data-episode') || epAttr.getAttribute('data-number');
-      if (/^\d+$/.test(v||'')) return parseInt(v,10);
-    }
-    const hrefHit = Array.from(document.querySelectorAll('a[href*="episode"], a[href*="/e"], a[href*="-ep"], a[href*="-episode-"]'))
-      .find(a => a.classList.contains('active') || a.getAttribute('aria-current') === 'page');
-    if (hrefHit) {
-      const via = parseEpFromUrlString(hrefHit.getAttribute('href')||'');
-      if (via) return via;
-    }
-    return null;
+    // fallback: old logic
+    return parseEpFromUrlString(location.href) ||
+           parseEpFromUrlString(qs('meta[property="og:url"]')?.content || '') ||
+           null;
   }
 
   // ---- MAL API wrappers ----
@@ -466,6 +568,10 @@
     let slug = parts[0] || '';
     if (slug && prefixes.has(slug.toLowerCase()) && parts[1]) slug = parts[1];
     slug = slug.replace(/-episode-?\d+.*$/i, '').replace(/-ep-?\d+.*$/i, '').replace(/-\d+$/i, '');
+    const provider = getProviderForHost(host);
+    if (provider) {
+      slug = slug.replace(/-\d+$/, ''); // remove hianime numeric tail
+    }
     return host + '|' + slug;
   }
   function pickBestMatch(data, guess){
