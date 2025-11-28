@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.5.1
+// @version      1.5.2
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -38,6 +38,12 @@
 (() => {
   'use strict';
   try { console.debug('[AnimeTrack] booting…', location.href); } catch {}
+
+  const DEBUG = true;
+  function dlog(){
+    if (!DEBUG) return;
+    try { console.debug('[AnimeTrack]', ...arguments); } catch {}
+  }
 
   // ---- GM polyfill ----
   const gm = (function(){
@@ -86,6 +92,7 @@
   function _decSlug(s){ try { return decodeURIComponent(s); } catch { return s || ''; } }
   // Extract a canonical series slug from a pathname
   function extractSeriesSlugFromPath(pathname){
+    dlog('extractSeriesSlugFromPath: in', pathname);
     const parts = (pathname||'').split('/').filter(Boolean);
     const prefixes = new Set(['watch','anime','series','stream','show']);
     let slug = parts.length > 1 && prefixes.has((parts[0]||'').toLowerCase()) ? parts[1] : (parts[0] || '');
@@ -98,6 +105,7 @@
     slug = slug.replace(/-(?:1080p|720p|sub|dub|watch|full|free)$/gi, '');
     // collapse dashes and trim
     slug = slug.replace(/-+/g,'-').replace(/^-|-$/g,'');
+    dlog('extractSeriesSlugFromPath: out', slug);
     return slug;
   }
 
@@ -238,6 +246,7 @@
     hianime: {
       domains: ['hianime.to', 'hianime.tv', 'aniwave.to', 'aniwave.se', 'aniwatch.to', 'aniwatchtv.to'],
       detectTitle(doc, loc) {
+        dlog('hianime.detectTitle: start', loc && loc.href);
         // 1) Canonical/OG/Twitter URL → slug → title
         const canonical = doc.querySelector('link[rel="canonical"]')?.href
                         || doc.querySelector('meta[property="og:url"]')?.content
@@ -256,7 +265,10 @@
                 .replace(/-\d{3,}$/i, '')
                 .replace(/[-_]+/g, ' ')
                 .trim();
-              if (slug) return titleCase(slug);
+              if (slug) {
+                dlog('hianime.detectTitle: canonical slug →', slug);
+                return titleCase(slug);
+              }
             }
           } catch {}
         }
@@ -269,7 +281,10 @@
             const arr = Array.isArray(data) ? data : [data];
             for (const obj of arr) {
               const nm = obj?.name || obj?.headline || obj?.['@name'] || obj?.alternateName;
-              if (nm && String(nm).trim().length > 1) return cleanTitle(nm);
+              if (nm && String(nm).trim().length > 1) {
+                dlog('hianime.detectTitle: JSON-LD name →', nm);
+                return cleanTitle(nm);
+              }
             }
           }
         } catch {}
@@ -284,7 +299,10 @@
           doc.querySelector('meta[property="og:title"]')?.content,
           doc.querySelector('meta[name="twitter:title"]')?.content
         ].filter(Boolean).map(cleanTitle).find(x => x && x.length > 1);
-        if (cand) return cand;
+        if (cand) {
+          dlog('hianime.detectTitle: DOM cand →', cand);
+          return cand;
+        }
 
         // 4) Fallback from current path
         try {
@@ -297,37 +315,54 @@
             .replace(/-\d{3,}$/i, '')
             .replace(/[-_]+/g, ' ')
             .trim();
-          if (slug) return titleCase(slug);
+          if (slug) {
+            dlog('hianime.detectTitle: fallback path →', slug);
+            return titleCase(slug);
+          }
         } catch {}
 
+        dlog('hianime.detectTitle: fallback empty');
         return '';
       },
 
       detectEpisode(doc, loc) {
+        dlog('hianime.detectEpisode: start', loc && loc.href);
         const currentEpFromURL = (() => {
           const m = loc.href.match(/[?&]ep=([0-9]+)/i);
           return m ? m[1] : null;
         })();
+        dlog('hianime.detectEpisode: url ep=', currentEpFromURL);
 
         // Active element first
         const activeSelectors = [
           '.ep-item.active',
           '.ep-item a.active',
           '.list-episode a.active',
-          '.ss-list a.active'
+          '.ss-list a.active',
+          '.episodes-list .ep-item.active',
+          '.ss-list .ep-item.active',
+          'a.ep-item.active',
+          '.detail-infor-content a.active'
         ];
         for (const sel of activeSelectors) {
           const el = doc.querySelector(sel);
+          dlog('hianime.detectEpisode: active sel', sel, '→', el && (el.getAttribute('data-number')||el.getAttribute('data-ep')||el.getAttribute('data-episode')||el.textContent));
           if (!el) continue;
 
           const data = el.getAttribute('data-number') ||
                        el.getAttribute('data-ep') ||
                        el.getAttribute('data-episode');
-          if (data && /^\d+$/.test(data)) return parseInt(data);
+          if (data && /^\d+$/.test(data)) {
+            dlog('hianime.detectEpisode: active number →', parseInt(data));
+            return parseInt(data);
+          }
 
           const t = el.textContent;
           const m = t?.match(/(\d{1,4})/);
-          if (m) return parseInt(m[1]);
+          if (m) {
+            dlog('hianime.detectEpisode: active number →', parseInt(m[1]));
+            return parseInt(m[1]);
+          }
         }
 
         // If URL has ep=xxxx, match anchor with same internal id
@@ -340,7 +375,10 @@
             const num = link.getAttribute('data-number') ||
                         link.getAttribute('data-ep') ||
                         link.textContent.match(/\d+/)?.[0];
-            if (num) return parseInt(num);
+            if (num) {
+              dlog('hianime.detectEpisode: matched by URL anchor →', parseInt(num));
+              return parseInt(num);
+            }
           }
         }
 
@@ -354,7 +392,11 @@
             return m ? parseInt(m[0]) : null;
           })
           .filter(Boolean);
-        if (nums.length) return Math.max(...nums);
+        if (nums.length) {
+          dlog('hianime.detectEpisode: fallback list nums =', nums);
+          dlog('hianime.detectEpisode: fallback picked max →', Math.max(...nums));
+          return Math.max(...nums);
+        }
 
         return null;
       }
@@ -490,17 +532,21 @@ function seasonVariants(base){
     return null;
   }
   function guessTitle(){
+    dlog('guessTitle: start');
     const provider = getProviderForHost(location.hostname);
     if (provider && provider.detectTitle) {
       const t = provider.detectTitle(document, location);
-      if (t && t.trim().length > 1) return cleanTitle(t);
+      if (t && t.trim().length > 1) {
+        dlog('guessTitle: provider returned →', t);
+        return cleanTitle(t);
+      }
     }
 
     // fallback to existing logic
     const ogSlug = fromOgUrlSlug();
-    if (ogSlug) return titleCase(ogSlug);
+    if (ogSlug) { dlog('guessTitle: ogSlug →', ogSlug); return titleCase(ogSlug); }
     const ld = parseJSONLDName();
-    if (ld) return ld;
+    if (ld) { dlog('guessTitle: JSON-LD →', ld); return ld; }
 
     const cand = [
       qs('.film-name')?.textContent,
@@ -530,8 +576,10 @@ function seasonVariants(base){
     if (/\bs\d{1,2}\b/i.test(slug)){
       const sn = parseInt(slug.match(/\bs(\d{1,2})\b/i)[1], 10);
       const base = slug.replace(/\bs\d{1,2}\b/i,'').replace(/-+/g,' ').trim();
+      dlog('guessTitle: path slug →', `${base} Season ${sn}`);
       return titleCase(`${base} Season ${sn}`);
     }
+    dlog('guessTitle: path slug →', slug);
     return slugToTitle(slug);
   }
 
@@ -668,24 +716,33 @@ function seasonVariants(base){
 
   function getSeriesKey(){
     const host = location.host.replace(/^www\./i,'').toLowerCase();
+    dlog('getSeriesKey: start host=', host);
     // 1) Prefer canonical from og:url if available
     const og = (function(){ try { return qs('meta[property="og:url"]')?.content || qs('meta[name="twitter:url"]')?.content; } catch { return ''; } })();
+    dlog('getSeriesKey: og url =', og);
     let slug = '';
     if (og) {
       try {
         const u = new URL(og);
         slug = extractSeriesSlugFromPath(u.pathname);
+        dlog('getSeriesKey: slug from og =', slug);
       } catch {}
     }
     // 2) Fallback to current path
-    if (!slug) slug = extractSeriesSlugFromPath(location.pathname);
+    if (!slug) {
+      dlog('getSeriesKey: slug from path (pre) =', location.pathname);
+      slug = extractSeriesSlugFromPath(location.pathname);
+      dlog('getSeriesKey: slug from path =', slug);
+    }
 
     // Fallback: if slug still empty, build from guessed title
     if (!slug) {
+      dlog('getSeriesKey: slug empty, using guessTitle fallback');
       const t = (typeof guessTitle === 'function') ? guessTitle() : '';
       if (t) {
         slug = t.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'');
       }
+      dlog('getSeriesKey: slug after title fallback =', slug);
     }
 
     // 3) Provider-specific tail cleanup (e.g., HiAnime numeric tails)
@@ -695,6 +752,7 @@ function seasonVariants(base){
     // 4) Final normalization
     slug = (slug||'').toLowerCase();
     if (!slug) slug = 'unresolved';
+    dlog('getSeriesKey: final key =', host + '|' + slug);
     return host + '|' + slug;
   }
   function pickBestMatch(data, guess){
@@ -746,21 +804,27 @@ function seasonVariants(base){
     return bestNode || (data[0] && (data[0].node || data[0])) || null;
   }
   async function ensureAutoMappingIfNeeded(){
+    dlog('ensureAutoMappingIfNeeded: start');
     const key = getSeriesKey();
     const mapped = await getMap(key);
+    dlog('ensureAutoMappingIfNeeded: key=', key, 'mapped=', mapped);
     if (mapped && mapped.id) return mapped;
     const guess = guessTitle();
+    dlog('ensureAutoMappingIfNeeded: guess=', guess);
     if (!guess || guess.length < 2) return null;
     let picked = null, data = [];
     const cands = seasonVariants(guess);
+    dlog('ensureAutoMappingIfNeeded: cands=', cands);
     for (const q of cands){
       const res = await malSearch(q);
       data = (res && res.data) || [];
+      dlog('ensureAutoMappingIfNeeded: search q=', q, 'results=', data && data.length);
       if (data.length){
         picked = pickBestMatch(data, q);
         if (picked) break;
       }
     }
+    if (picked) dlog('ensureAutoMappingIfNeeded: picked=', picked && {id:picked.id, title:picked.title});
     if (!picked){ toast('Title not found. Use search to map.'); return null; }
     await setMap(key, picked.id, picked.title);
     return { id: picked.id, title: picked.title };
@@ -870,6 +934,7 @@ function seasonVariants(base){
     const seriesKey = getSeriesKey();
     const mapped = onMAL ? null : (await getMap(seriesKey) || await ensureAutoMappingIfNeeded());
     const epGuess = onMAL ? null : guessEpisode();
+    const alreadyWatched = (authed && mapped && mapped.id && watchedCount != null && epGuess != null && Number(epGuess) <= Number(watchedCount));
     let myStatus = null; let watchedCount = null; let needsWatching = false;
     if (authed && mapped && mapped.id) {
       try {
@@ -935,7 +1000,7 @@ function seasonVariants(base){
       <div class="row">
         <span class="sub">Episode:</span>
         <input id="at-ep" type="number" min="0" step="1" value="${epGuess ?? ''}" placeholder="ep">
-        <button id="at-mark" class="ghost">Mark watched</button>
+        <button id="at-mark" class="ghost" ${alreadyWatched ? 'disabled' : ''}>${alreadyWatched ? 'Already watched ✓' : 'Mark watched'}</button>
       </div>` : ``}
 
       ${onMAL ? `
