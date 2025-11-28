@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.4.7
+// @version      1.4.8
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -322,6 +322,18 @@
       const m = t.match(/\b(?:ep|episode)?\s*(\d{1,4})\b/i);
       if (m) return parseInt(m[1],10);
     }
+    // Extra selectors common on hianime/9anime/zoro variants
+    const epAttr = document.querySelector('[data-ep], [data-episode], [data-number]');
+    if (epAttr) {
+      const v = epAttr.getAttribute('data-ep') || epAttr.getAttribute('data-episode') || epAttr.getAttribute('data-number');
+      if (/^\d+$/.test(v||'')) return parseInt(v,10);
+    }
+    const hrefHit = Array.from(document.querySelectorAll('a[href*="episode"], a[href*="/e"], a[href*="-ep"], a[href*="-episode-"]'))
+      .find(a => a.classList.contains('active') || a.getAttribute('aria-current') === 'page');
+    if (hrefHit) {
+      const via = parseEpFromUrlString(hrefHit.getAttribute('href')||'');
+      if (via) return via;
+    }
     return null;
   }
 
@@ -357,6 +369,26 @@
     const token = await ensureFreshToken();
     const url = `https://api.myanimelist.net/v2/anime/${encodeURIComponent(malAnimeId)}/my_list_status`;
     const body = encodeForm({ num_watched_episodes: watchedEp });
+    const res = await xhr('PATCH', url, { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/x-www-form-urlencoded' }, body);
+    return res;
+  }
+  async function getMyListStatus(malAnimeId){
+    const token = await ensureFreshToken();
+    const url = `https://api.myanimelist.net/v2/anime/${encodeURIComponent(malAnimeId)}/my_list_status`;
+    return new Promise((resolve) => {
+      gm.xmlHttpRequest({
+        method: 'GET',
+        url,
+        headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' },
+        onload: (r) => { try { resolve(JSON.parse(r.responseText)); } catch { resolve(null); } },
+        onerror: () => resolve(null)
+      });
+    });
+  }
+  async function setMyStatusWatching(malAnimeId){
+    const token = await ensureFreshToken();
+    const url = `https://api.myanimelist.net/v2/anime/${encodeURIComponent(malAnimeId)}/my_list_status`;
+    const body = encodeForm({ status: 'watching' });
     const res = await xhr('PATCH', url, { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/x-www-form-urlencoded' }, body);
     return res;
   }
@@ -414,8 +446,22 @@
   }
 
   function getSeriesKey(){
-    const {host, pathname} = location;
-    const parts = pathname.split('/').filter(Boolean);
+    const {host} = location;
+    // Prefer canonical slug from og:url if present
+    const og = (function(){ try { return qs('meta[property=\"og:url\"]')?.content || qs('meta[name=\"twitter:url\"]')?.content; } catch { return ''; } })();
+    if (og) {
+      try {
+        const u = new URL(og);
+        const parts = u.pathname.split('/').filter(Boolean);
+        let slug = parts[1] || parts[0] || '';
+        const prefixes = new Set(['watch','anime','series','stream','show']);
+        if (slug && prefixes.has((parts[0]||'').toLowerCase()) && parts[1]) slug = parts[1];
+        slug = slug.replace(/-episode-?\d+.*$/i, '').replace(/-ep-?\d+.*$/i, '').replace(/-\d+$/i, '');
+        return host + '|' + slug;
+      } catch {}
+    }
+    // Fallback to current pathname
+    const parts = location.pathname.split('/').filter(Boolean);
     const prefixes = new Set(['watch','anime','series','stream','show']);
     let slug = parts[0] || '';
     if (slug && prefixes.has(slug.toLowerCase()) && parts[1]) slug = parts[1];
@@ -552,6 +598,15 @@
     const seriesKey = getSeriesKey();
     const mapped = onMAL ? null : (await getMap(seriesKey) || await ensureAutoMappingIfNeeded());
     const epGuess = onMAL ? null : guessEpisode();
+    let myStatus = null; let watchedCount = null; let needsWatching = false;
+    if (authed && mapped && mapped.id) {
+      try {
+        myStatus = await getMyListStatus(mapped.id);
+        if (myStatus && typeof myStatus.num_watched_episodes === 'number') watchedCount = myStatus.num_watched_episodes;
+        const st = (myStatus && myStatus.status) || '';
+        if (st && st.toLowerCase && st.toLowerCase() !== 'watching') needsWatching = true;
+      } catch(_) {}
+    }
     const mappedLine = mapped && mapped.id ? `${mapped.title || 'Mapped'} (#${mapped.id})` : '—';
     const lastErr = await gm.getValue(STORAGE.oauthErr, '');
 
@@ -582,6 +637,19 @@
         <div style="flex:1"></div>
         <button id="at-unmap" class="ghost"${mapped && mapped.id ? '' : ' disabled'}>Clear</button>
       </div>` : ``}
+      
+      ${(!onMAL && authed && mapped && mapped.id) ? `
+      <div class="row">
+        <span class="sub">Status:</span>
+        <span class="sub" id="at-statline">${myStatus && myStatus.status ? myStatus.status : '—'}</span>
+        <div style="flex:1"></div>
+        ${needsWatching ? '<button id="at-setwatch" class="primary">Set to Watching</button>' : ''}
+      </div>
+      <div class="row">
+        <span class="sub">Watched:</span>
+        <span class="sub" id="at-wcount">${(watchedCount!=null)? watchedCount : '—'}</span>
+      </div>
+      ` : ``}
 
       ${(!onMAL && (!mapped || !mapped.id)) ? `
       <div class="row">
@@ -860,8 +928,31 @@
         const ep = Number(card.querySelector('#at-ep').value || 0);
         if (!m || !m.id) return toast('Map this series to a MAL title first.');
         if (!ep) return toast('Enter an episode number.');
-        try { await updateMyListEpisodes(m.id, ep); toast('Marked ep ' + ep + ' watched.'); }
-        catch(e) { toast('Update failed: ' + (e && e.message || e)); }
+        let st = null;
+        try { st = await getMyListStatus(m.id); } catch {}
+        const stName = (st && st.status) ? String(st.status).toLowerCase() : '';
+        const watched = (st && typeof st.num_watched_episodes === 'number') ? st.num_watched_episodes : null;
+        if (stName && stName !== 'watching') {
+          toast('Set status to "Watching" to enable marking.');
+          const btn = card.querySelector('#at-setwatch');
+          if (btn) btn.classList.add('primary');
+          return;
+        }
+        if (watched != null && ep <= watched) {
+          return toast(`You already have ep ${watched} watched.`);
+        }
+        try {
+          await updateMyListEpisodes(m.id, ep);
+          toast('Marked ep ' + ep + ' watched.');
+          await renderPanel();
+        } catch(e) { toast('Update failed: ' + (e && e.message || e)); }
+      };
+      const setWatchBtn = card.querySelector('#at-setwatch');
+      if (setWatchBtn) setWatchBtn.onclick = async () => {
+        const m = await getMap(seriesKey) || await ensureAutoMappingIfNeeded();
+        if (!m || !m.id) return toast('Map this series first.');
+        try { await setMyStatusWatching(m.id); toast('Status set to Watching'); await renderPanel(); }
+        catch(e){ toast('Failed to set status: ' + (e && e.message || e)); }
       };
     } else {
       const addBtn = card.querySelector('#at-addbtn');
@@ -908,6 +999,17 @@
         const ep = guessEpisode() || 1;
         if (m && m.id && !(scrobbleLoop._markedForEp||{})[ep]) {
           try {
+            // respect MAL status: require Watching
+            try {
+              const st = await getMyListStatus(m.id);
+              const stName = (st && st.status) ? String(st.status).toLowerCase() : '';
+              if (stName && stName !== 'watching') {
+                toast('Set status to "Watching" to enable auto-mark.');
+                return requestAnimationFrame(scrobbleLoop);
+              }
+              const watched = (st && typeof st.num_watched_episodes === 'number') ? st.num_watched_episodes : 0;
+              if (ep <= watched) return requestAnimationFrame(scrobbleLoop);
+            } catch (_) {}
             await updateMyListEpisodes(m.id, ep);
             scrobbleLoop._markedForEp = scrobbleLoop._markedForEp || {};
             scrobbleLoop._markedForEp[ep] = true;
