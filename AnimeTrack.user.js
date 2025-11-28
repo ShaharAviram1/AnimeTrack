@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.5.2
+// @version      1.5.3
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -37,13 +37,21 @@
 
 (() => {
   'use strict';
-  try { console.debug('[AnimeTrack] booting…', location.href); } catch {}
+  try { console.log('[AnimeTrack] booting…', location.href); } catch {}
 
-  const DEBUG = true;
+  let DEBUG = true; // can be toggled at runtime
   function dlog(){
     if (!DEBUG) return;
-    try { console.debug('[AnimeTrack]', ...arguments); } catch {}
+    try { console.log('[AnimeTrack]', ...arguments); } catch {}
   }
+  // Expose quick toggles for debugging
+  try {
+    window.AnimeTrackDebug = {
+      on(){ DEBUG = true; try { console.log('[AnimeTrack] DEBUG ON'); } catch {} },
+      off(){ DEBUG = false; try { console.log('[AnimeTrack] DEBUG OFF'); } catch {} },
+      toggle(){ DEBUG = !DEBUG; try { console.log('[AnimeTrack] DEBUG', DEBUG); } catch {} }
+    };
+  } catch {}
 
   // ---- GM polyfill ----
   const gm = (function(){
@@ -56,6 +64,16 @@
     if (typeof g.registerMenuCommand !== 'function') g.registerMenuCommand = (_t,_f)=>{};
     return g;
   })();
+
+  try {
+    if (gm && typeof gm.registerMenuCommand === 'function') {
+      gm.registerMenuCommand('AnimeTrack: Toggle Debug', () => {
+        DEBUG = !DEBUG;
+        try { console.log('[AnimeTrack] DEBUG', DEBUG); } catch {}
+        try { toast('Debug ' + (DEBUG ? 'ON' : 'OFF')); } catch {}
+      });
+    }
+  } catch {}
 
   // ---- Constants ----
   let MAL_CLIENT_ID = '8cdc30a4b5c47b9aebe8372b6c5883ee';
@@ -182,6 +200,8 @@
     panel.appendChild(card);
     panel.style.display = 'none';
     shadow.appendChild(panel);
+
+    try { console.log('[AnimeTrack] UI shell ready'); } catch {}
 
     try {
       domObs = new MutationObserver(() => updateBubble());
