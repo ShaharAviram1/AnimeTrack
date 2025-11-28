@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.4.10
+// @version      1.5.0
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -331,7 +331,7 @@
             const v = x.getAttribute('data-number') ||
                       x.getAttribute('data-ep') ||
                       x.textContent;
-            const m = v?.match(/\\d+/);
+            const m = v?.match(/\d+/);
             return m ? parseInt(m[0]) : null;
           })
           .filter(Boolean);
@@ -343,7 +343,7 @@
   };
 
   function getProviderForHost(host) {
-    host = host.toLowerCase();
+    host = host.replace(/^www\./i,'').toLowerCase();
     for (const key in PROVIDERS) {
       if (PROVIDERS[key].domains.includes(host)) return PROVIDERS[key];
     }
@@ -359,6 +359,69 @@
     t = t.replace(/\s{2,}/g, ' ').trim();
     return t.trim();
   }
+  // --- MAL-Sync-inspired title normalization helpers ---
+function normalizeCmp(s){
+  return (s||'')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')     // strip diacritics
+    .replace(/[^a-z0-9]+/g, ' ')         // collapse non-alnum
+    .replace(/\b(tv|anime|official site)\b/g, '')
+    .replace(/\s+/g,' ')
+    .trim();
+}
+function romanToInt(roman){
+  if (!roman) return null;
+  const map = {M:1000,CM:900,D:500,CD:400,C:100,XC:90,L:50,XL:40,X:10,IX:9,V:5,IV:4,I:1};
+  let i=0, n=0, s=roman.toUpperCase();
+  while (i < s.length){
+    if (i+1<s.length && map[s.slice(i,i+2)]){ n += map[s.slice(i,i+2)]; i+=2; }
+    else { const v = map[s[i]]; if (!v) return null; n += v; i++; }
+  }
+  return n || null;
+}
+function intToRoman(num){
+  if (!num || num<1) return '';
+  const vals = [[1000,'M'],[900,'CM'],[500,'D'],[400,'CD'],[100,'C'],[90,'XC'],[50,'L'],[40,'XL'],[10,'X'],[9,'IX'],[5,'V'],[4,'IV'],[1,'I']];
+  let out=''; for(const [v,sym] of vals){ while(num>=v){ out+=sym; num-=v; } } return out;
+}
+function detectSeasonNumber(s){
+  if (!s) return null;
+  const t = s.toLowerCase();
+  let m = t.match(/\bseason\s*(\d{1,2})\b/); if (m) return parseInt(m[1],10);
+  m = t.match(/\bs\s*(\d{1,2})\b/);          if (m) return parseInt(m[1],10);
+  m = t.match(/\b(\d{1,2})(?:st|nd|rd|th)\s*season\b/); if (m) return parseInt(m[1],10);
+  m = t.match(/\bseason\s*([ivxlcdm]+)\b/i); if (m){ const n = romanToInt(m[1]); if (n) return n; }
+  m = t.match(/\b([ivxlcdm]+)\s*season\b/i); if (m){ const n = romanToInt(m[1]); if (n) return n; }
+  return null;
+}
+function stripSeasonPhrases(s){
+  if (!s) return s;
+  return s
+    .replace(/\b(\d{1,2})(?:st|nd|rd|th)\s*season\b/ig,'')
+    .replace(/\bseason\s*[ivxlcdm]+\b/ig,'')
+    .replace(/\b[ivxlcdm]+\s*season\b/ig,'')
+    .replace(/\bseason\s*\d{1,2}\b/ig,'')
+    .replace(/\bs\s*\d{1,2}\b/ig,'')
+    .replace(/\s{2,}/g,' ').trim();
+}
+function seasonVariants(base){
+  const out = new Set();
+  const b = cleanTitle(base);
+  const n = detectSeasonNumber(b);
+  const core = stripSeasonPhrases(b);
+  out.add(b);
+  out.add(core);
+  if (n){
+    const ord = (n%10===1&&n%100!==11)?'st':(n%10===2&&n%100!==12)?'nd':(n%10===3&&n%100!==13)?'rd':'th';
+    out.add(`${core} Season ${n}`);
+    out.add(`${core} ${n}${ord} Season`);
+    out.add(`${core} ${intToRoman(n)}`);
+    out.add(`${core} Season ${intToRoman(n)}`);
+    out.add(`${core} S${n}`);
+  }
+  return Array.from(out).filter(x=>x && x.length>1);
+}
   function fromOgUrlSlug(){
     try{
       const u = qs('meta[property="og:url"]')?.content || qs('meta[name="twitter:url"]')?.content;
@@ -431,6 +494,12 @@
     const prefixes = new Set(['watch','anime','series','stream','show']);
     let slug = parts[0] || '';
     if (slug && prefixes.has(slug.toLowerCase()) && parts[1]) slug = parts[1];
+    // Expand short season markers in slug (e.g., "-s2" -> "Season 2")
+    if (/\bs\d{1,2}\b/i.test(slug)){
+      const sn = parseInt(slug.match(/\bs(\d{1,2})\b/i)[1], 10);
+      const base = slug.replace(/\bs\d{1,2}\b/i,'').replace(/-+/g,' ').trim();
+      return titleCase(`${base} Season ${sn}`);
+    }
     return slugToTitle(slug);
   }
 
@@ -589,14 +658,40 @@
   }
   function pickBestMatch(data, guess){
     if (!data || !data.length) return null;
-    const g = (guess||'').toLowerCase();
-    let exact = data.find(x => (x.node.title||'').toLowerCase() === g);
-    if (exact) return exact.node;
-    let starts = data.find(x => (x.node.title||'').toLowerCase().startsWith(g));
-    if (starts) return starts.node;
-    let contains = data.find(x => (x.node.title||'').toLowerCase().includes(g));
-    if (contains) return contains.node;
-    return data[0].node;
+    const gRaw = guess || '';
+    const gNorm = normalizeCmp(gRaw);
+
+    function titlesOf(node){
+      const alts = [];
+      if (!node) return alts;
+      if (node.title) alts.push(node.title);
+      const at = node.alternative_titles || {};
+      ['en','en_jp','ja','ja_jp','synonyms'].forEach(k => {
+        const v = at[k];
+        if (Array.isArray(v)) v.forEach(x => alts.push(x));
+        else if (typeof v === 'string') alts.push(v);
+      });
+      return alts.filter(Boolean);
+}
+function score(node){
+  const all = titlesOf(node);
+  if (!all.length) return -1;
+  let best = -1;
+  for (const t of all){
+    const n = normalizeCmp(t);
+    if (n === gNorm) return 100;            // exact normalized
+    if (n.startsWith(gNorm)) best = Math.max(best, 80);
+    if (n.includes(gNorm))  best = Math.max(best, 60);
+  }
+  return best;
+}
+let bestNode = null, bestScore = -1;
+for (const x of data){
+  const node = x.node || x;
+  const s = score(node);
+  if (s > bestScore){ bestScore = s; bestNode = node; }
+}
+return bestNode || (data[0] && (data[0].node || data[0])) || null;
   }
   async function ensureAutoMappingIfNeeded(){
     const key = getSeriesKey();
@@ -604,11 +699,17 @@
     if (mapped && mapped.id) return mapped;
     const guess = guessTitle();
     if (!guess || guess.length < 2) return null;
-    const res = await malSearch(guess);
-    const data = (res && res.data) || [];
-    if (!data.length) { toast('Title not found. Use search to map.'); return null; }
-    const picked = pickBestMatch(data, guess);
-    if (!picked) return null;
+    let picked = null, data = [];
+    const cands = seasonVariants(guess);
+    for (const q of cands){
+      const res = await malSearch(q);
+      data = (res && res.data) || [];
+      if (data.length){
+        picked = pickBestMatch(data, q);
+        if (picked) break;
+      }
+    }
+    if (!picked){ toast('Title not found. Use search to map.'); return null; }
     await setMap(key, picked.id, picked.title);
     return { id: picked.id, title: picked.title };
   }
