@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.5.0
+// @version      1.5.1
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -238,50 +238,69 @@
     hianime: {
       domains: ['hianime.to', 'hianime.tv', 'aniwave.to', 'aniwave.se', 'aniwatch.to', 'aniwatchtv.to'],
       detectTitle(doc, loc) {
-        // Prefer OG URL → slug
-        const og = doc.querySelector('meta[property="og:url"]')?.content || '';
-        if (og) {
+        // 1) Canonical/OG/Twitter URL → slug → title
+        const canonical = doc.querySelector('link[rel="canonical"]')?.href
+                        || doc.querySelector('meta[property="og:url"]')?.content
+                        || doc.querySelector('meta[name="twitter:url"]')?.content
+                        || '';
+        if (canonical) {
           try {
-            const u = new URL(og);
+            const u = new URL(canonical);
             const parts = u.pathname.split('/').filter(Boolean);
             let slug = parts.includes('watch') ? parts[parts.indexOf('watch') + 1] : parts[0];
             if (slug) {
               slug = slug
                 .replace(/-episode-?\d+.*/i, '')
                 .replace(/-ep-?\d+.*/i, '')
-                .replace(/-\d+$/i, '')
+                .replace(/-s(?:eason)?-?\d+$/i, '')
+                .replace(/-\d{3,}$/i, '')
                 .replace(/[-_]+/g, ' ')
                 .trim();
-              return slug;
+              if (slug) return titleCase(slug);
             }
-          } catch(e){}
+          } catch {}
         }
 
-        // JSON-LD fallback
-        const ld = (() => {
-          try {
-            const nodes = doc.querySelectorAll('script[type="application/ld+json"]');
-            for (const n of nodes) {
-              const data = JSON.parse(n.textContent);
-              const arr = Array.isArray(data)? data : [data];
-              for (const obj of arr) {
-                const nm = obj?.name || obj?.headline;
-                if (nm) return nm;
-              }
+        // 2) JSON-LD structured data
+        try {
+          const nodes = doc.querySelectorAll('script[type="application/ld+json"]');
+          for (const n of nodes) {
+            const data = JSON.parse(n.textContent || 'null');
+            const arr = Array.isArray(data) ? data : [data];
+            for (const obj of arr) {
+              const nm = obj?.name || obj?.headline || obj?.['@name'] || obj?.alternateName;
+              if (nm && String(nm).trim().length > 1) return cleanTitle(nm);
             }
-          } catch(e){}
-          return null;
-        })();
-        if (ld) return ld;
+          }
+        } catch {}
 
-        // UI fallback
-        return (
-          doc.querySelector('.film-name')?.textContent ||
-          doc.querySelector('.anisc-detail .name')?.textContent ||
-          doc.querySelector('h1')?.textContent ||
-          doc.title ||
-          ''
-        );
+        // 3) Common title containers on HiAnime/9anime clones
+        const cand = [
+          doc.querySelector('.film-name a')?.textContent,
+          doc.querySelector('.film-name')?.textContent,
+          doc.querySelector('.anisc-detail .name')?.textContent,
+          doc.querySelector('.dynamic-name')?.textContent,
+          doc.querySelector('h1')?.textContent,
+          doc.querySelector('meta[property="og:title"]')?.content,
+          doc.querySelector('meta[name="twitter:title"]')?.content
+        ].filter(Boolean).map(cleanTitle).find(x => x && x.length > 1);
+        if (cand) return cand;
+
+        // 4) Fallback from current path
+        try {
+          const parts = loc.pathname.split('/').filter(Boolean);
+          let slug = parts.includes('watch') ? parts[parts.indexOf('watch') + 1] : parts[0] || '';
+          slug = slug
+            .replace(/-episode-?\d+.*/i, '')
+            .replace(/-ep-?\d+.*/i, '')
+            .replace(/-s(?:eason)?-?\d+$/i, '')
+            .replace(/-\d{3,}$/i, '')
+            .replace(/[-_]+/g, ' ')
+            .trim();
+          if (slug) return titleCase(slug);
+        } catch {}
+
+        return '';
       },
 
       detectEpisode(doc, loc) {
@@ -356,7 +375,15 @@
     t = t.replace(/\b(episode|ep)\s*\d+\b/ig, '');
     t = t.replace(/\[[^\]]*\]/g, '').replace(/\([^\)]*\)/g, '');
     t = t.replace(/-\s*(watch\s*online|anime|official site).*$/i, '');
-    t = t.replace(/\s{2,}/g, ' ').trim();
+    // Strip common stream-site suffixes
+    t = t.replace(/\b(?:sub|dub|dual audio)\b/ig, '');
+    t = t.replace(/\b(?:uncensored|censored|blu[-\s]?ray|bd|web[-\s]?dl|1080p|720p|480p)\b/ig, '');
+    // Remove trailing year tokens like (2024) or - 2024
+    t = t.replace(/\(?\b(19|20)\d{2}\b\)?$/,'');
+    // Normalize Part/Cour phrases for comparison (do not delete numbers here)
+    t = t.replace(/\bpart\s*(\d{1,2})\b/ig, 'season $1');
+    t = t.replace(/\bcour\s*(\d{1,2})\b/ig, 'season $1');
+    t = t.replace(/\s{2,}/g,' ');
     return t.trim();
   }
   // --- MAL-Sync-inspired title normalization helpers ---
@@ -391,8 +418,13 @@ function detectSeasonNumber(s){
   let m = t.match(/\bseason\s*(\d{1,2})\b/); if (m) return parseInt(m[1],10);
   m = t.match(/\bs\s*(\d{1,2})\b/);          if (m) return parseInt(m[1],10);
   m = t.match(/\b(\d{1,2})(?:st|nd|rd|th)\s*season\b/); if (m) return parseInt(m[1],10);
+  // roman numerals
   m = t.match(/\bseason\s*([ivxlcdm]+)\b/i); if (m){ const n = romanToInt(m[1]); if (n) return n; }
   m = t.match(/\b([ivxlcdm]+)\s*season\b/i); if (m){ const n = romanToInt(m[1]); if (n) return n; }
+  // part/cour synonyms
+  m = t.match(/\bpart\s*(\d{1,2})\b/); if (m) return parseInt(m[1],10);
+  m = t.match(/\bcour\s*(\d{1,2})\b/); if (m) return parseInt(m[1],10);
+  // phrases like "final season" cannot map to a number reliably → return null
   return null;
 }
 function stripSeasonPhrases(s){
@@ -648,12 +680,21 @@ function seasonVariants(base){
     // 2) Fallback to current path
     if (!slug) slug = extractSeriesSlugFromPath(location.pathname);
 
+    // Fallback: if slug still empty, build from guessed title
+    if (!slug) {
+      const t = (typeof guessTitle === 'function') ? guessTitle() : '';
+      if (t) {
+        slug = t.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'');
+      }
+    }
+
     // 3) Provider-specific tail cleanup (e.g., HiAnime numeric tails)
     const provider = getProviderForHost(host);
     if (provider) slug = slug.replace(/-\d{3,}$/,'');
 
     // 4) Final normalization
     slug = (slug||'').toLowerCase();
+    if (!slug) slug = 'unresolved';
     return host + '|' + slug;
   }
   function pickBestMatch(data, guess){
@@ -672,26 +713,37 @@ function seasonVariants(base){
         else if (typeof v === 'string') alts.push(v);
       });
       return alts.filter(Boolean);
-}
-function score(node){
-  const all = titlesOf(node);
-  if (!all.length) return -1;
-  let best = -1;
-  for (const t of all){
-    const n = normalizeCmp(t);
-    if (n === gNorm) return 100;            // exact normalized
-    if (n.startsWith(gNorm)) best = Math.max(best, 80);
-    if (n.includes(gNorm))  best = Math.max(best, 60);
-  }
-  return best;
-}
-let bestNode = null, bestScore = -1;
-for (const x of data){
-  const node = x.node || x;
-  const s = score(node);
-  if (s > bestScore){ bestScore = s; bestNode = node; }
-}
-return bestNode || (data[0] && (data[0].node || data[0])) || null;
+    }
+    function score(node){
+      const all = titlesOf(node);
+      if (!all.length) return -1;
+      let best = -1;
+      const gTokens = new Set(normalizeCmp(gRaw).split(' ').filter(Boolean));
+      for (const t of all){
+        const n = normalizeCmp(t);
+        if (!n) continue;
+        if (n === gNorm) return 100;                  // exact normalized
+        let s = -1;
+        if (n.startsWith(gNorm)) s = Math.max(s, 82);
+        if (n.includes(gNorm))  s = Math.max(s, 66);
+        // token overlap bonus
+        const nTokens = new Set(n.split(' ').filter(Boolean));
+        let inter = 0; for (const tok of gTokens) if (nTokens.has(tok)) inter++;
+        const overlap = inter / Math.max(1, Math.min(gTokens.size, nTokens.size));
+        s = Math.max(s, Math.floor(overlap * 80));
+        // prefer TV when on streaming sites
+        if ((node.media_type === 'tv' || node.media_type === 'ona') && s >= 0) s += 3;
+        best = Math.max(best, s);
+      }
+      return best;
+    }
+    let bestNode = null, bestScore = -1;
+    for (const x of data){
+      const node = x.node || x;
+      const s = score(node);
+      if (s > bestScore){ bestScore = s; bestNode = node; }
+    }
+    return bestNode || (data[0] && (data[0].node || data[0])) || null;
   }
   async function ensureAutoMappingIfNeeded(){
     const key = getSeriesKey();
