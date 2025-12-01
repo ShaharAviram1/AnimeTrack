@@ -2,14 +2,14 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.5.3
+// @version      1.5.4
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
 // @supportURL   https://github.com/ShaharAviram1/AnimeTrack/issues
 // @updateURL    https://anime-track-oauth.shaharaviram.workers.dev/AnimeTrack.meta.js
 // @downloadURL  https://anime-track-oauth.shaharaviram.workers.dev/AnimeTrack.user.js
-// @run-at       document-start
+// @run-at       document-idle
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_xmlhttpRequest
@@ -22,7 +22,7 @@
 // @connect      api.myanimelist.net
 // @connect      shaharaviram.workers.dev
 // @connect      anime-track-oauth.shaharaviram.workers.dev
-// @match        *://*/*
+// @noframes
 // @match        *://myanimelist.net/*
 // @match        *://hianime.to/*
 // @match        *://hianime.tv/*
@@ -38,6 +38,15 @@
 (() => {
   'use strict';
   try { console.log('[AnimeTrack] booting…', location.href); } catch {}
+  // Catch hard errors early (helps Safari which may reload SPA routes on exceptions)
+  try {
+    window.addEventListener('error', (e)=>{
+      try { console.log('[AnimeTrack] window error:', e && (e.message||e.error)); } catch {}
+    });
+    window.addEventListener('unhandledrejection', (e)=>{
+      try { console.log('[AnimeTrack] unhandled rejection:', e && (e.reason && e.reason.message) || e && e.reason || e); } catch {}
+    });
+  } catch {}
 
   let DEBUG = true; // can be toggled at runtime
   function dlog(){
@@ -146,7 +155,7 @@
   // ---- UI shell ----
   let root, shadow, bubble, panel, panelOpen=false, domObs=null;
   function ensureShell() {
-    if (root || isFrame) return;
+    if (root || isFrame || window.top !== window.self) return;
     root = document.createElement('div');
     root.id = 'animetrack-root';
     document.documentElement.appendChild(root);
@@ -204,8 +213,12 @@
     try { console.log('[AnimeTrack] UI shell ready'); } catch {}
 
     try {
-      domObs = new MutationObserver(() => updateBubble());
-      domObs.observe(document.documentElement, {childList:true, subtree:true});
+      let t = null;
+      domObs = new MutationObserver(() => {
+        if (t) return; // debounce to once per frame
+        t = requestAnimationFrame(()=>{ t=null; updateBubble(); });
+      });
+      domObs.observe(document.body || document.documentElement, {childList:true, subtree:true});
     } catch {}
   }
   function toast(msg){
@@ -954,7 +967,8 @@ function seasonVariants(base){
     const seriesKey = getSeriesKey();
     const mapped = onMAL ? null : (await getMap(seriesKey) || await ensureAutoMappingIfNeeded());
     const epGuess = onMAL ? null : guessEpisode();
-    const alreadyWatched = (authed && mapped && mapped.id && watchedCount != null && epGuess != null && Number(epGuess) <= Number(watchedCount));
+
+    // Fetch status BEFORE computing alreadyWatched to avoid TDZ/undefined issues
     let myStatus = null; let watchedCount = null; let needsWatching = false;
     if (authed && mapped && mapped.id) {
       try {
@@ -964,6 +978,8 @@ function seasonVariants(base){
         if (st && st.toLowerCase && st.toLowerCase() !== 'watching') needsWatching = true;
       } catch(_) {}
     }
+
+    const alreadyWatched = (authed && mapped && mapped.id && watchedCount != null && epGuess != null && Number(epGuess) <= Number(watchedCount));
     const mappedLine = mapped && mapped.id ? `${mapped.title || 'Mapped'} (#${mapped.id})` : '—';
     const lastErr = await gm.getValue(STORAGE.oauthErr, '');
 
