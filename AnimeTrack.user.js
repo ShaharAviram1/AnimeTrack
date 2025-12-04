@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.5.8
+// @version      1.5.8.01
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -700,17 +700,33 @@ function seasonVariants(base){
 
     // Try 1: dedicated my_list_status endpoint with Bearer
     let resp = await gmGet(`${base}/my_list_status`, { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' });
-    if (resp.body && (resp.body.status || typeof resp.body.num_watched_episodes === 'number')) return resp.body;
+    if (resp.body && (resp.body.status || typeof resp.body.num_watched_episodes === 'number' || typeof resp.body.num_episodes_watched === 'number')) {
+      if (typeof resp.body.num_watched_episodes !== 'number' && typeof resp.body.num_episodes_watched === 'number') {
+        resp.body.num_watched_episodes = resp.body.num_episodes_watched;
+      }
+      return resp.body;
+    }
 
     // Try 2: same endpoint but add X-MAL-CLIENT-ID as a nudge
     if (!resp.body || !(resp.body.status || typeof resp.body.num_watched_episodes === 'number')) {
       resp = await gmGet(`${base}/my_list_status`, { 'Authorization': `Bearer ${token}`, 'X-MAL-CLIENT-ID': MAL_CLIENT_ID, 'Accept': 'application/json' });
-      if (resp.body && (resp.body.status || typeof resp.body.num_watched_episodes === 'number')) return resp.body;
+      if (resp.body && (resp.body.status || typeof resp.body.num_watched_episodes === 'number' || typeof resp.body.num_episodes_watched === 'number')) {
+        if (typeof resp.body.num_watched_episodes !== 'number' && typeof resp.body.num_episodes_watched === 'number') {
+          resp.body.num_watched_episodes = resp.body.num_episodes_watched;
+        }
+        return resp.body;
+      }
     }
 
     // Try 3: fetch the anime with fields=my_list_status and extract
     resp = await gmGet(`${base}?fields=my_list_status`, { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' });
-    if (resp.body && resp.body.my_list_status) return resp.body.my_list_status;
+    if (resp.body && resp.body.my_list_status) {
+      const st = resp.body.my_list_status;
+      if (typeof st.num_watched_episodes !== 'number' && typeof st.num_episodes_watched === 'number') {
+        st.num_watched_episodes = st.num_episodes_watched;
+      }
+      return st;
+    }
 
     // Not in list or unavailable
     dlog('getMyListStatus: no list status available; maybe not in list yet');
@@ -852,14 +868,17 @@ function seasonVariants(base){
         let inter = 0; for (const tok of gTokens) if (nTokens.has(tok)) inter++;
         const overlap = inter / Math.max(1, Math.min(gTokens.size, nTokens.size));
         s = Math.max(s, Math.floor(overlap * 80));
-        // prefer TV when on streaming sites
-        if ((node.media_type === 'tv' || node.media_type === 'ona') && s >= 0) s += 3;
-        // Strong tie-break for One Piece main TV series
+        // Media-type preferences
+        if (s >= 0) {
+          if (node.media_type === 'tv') s += 10; // stronger bias for long-running series
+          else if (node.media_type === 'ona') s += 2;
+          else if (node.media_type === 'ova' || node.media_type === 'special' || node.media_type === 'movie') s -= 20;
+        }
+        // Strong tie-break for One Piece main TV series vs movies/specials/live-action
         if (gNorm.startsWith('one piece')){
           const titleNorm = normalizeCmp(node.title || '');
-          if (titleNorm === 'one piece' && node.media_type === 'tv') {
-            s += 50; // heavily prefer the main TV entry over movies/specials
-          }
+          if (node.id === 21) s += 80; // MAL ID 21 is the main One Piece anime
+          else if (titleNorm === 'one piece' && node.media_type !== 'tv') s -= 40; // push away non-TV "One Piece"
         }
         best = Math.max(best, s);
       }
@@ -1019,7 +1038,10 @@ function seasonVariants(base){
     if (authed && mapped && mapped.id) {
       try {
         myStatus = await getMyListStatus(mapped.id);
-        if (myStatus && typeof myStatus.num_watched_episodes === 'number') watchedCount = myStatus.num_watched_episodes;
+        if (myStatus) {
+          if (typeof myStatus.num_watched_episodes === 'number') watchedCount = myStatus.num_watched_episodes;
+          else if (typeof myStatus.num_episodes_watched === 'number') watchedCount = myStatus.num_episodes_watched;
+        }
         const st = (myStatus && myStatus.status) || '';
         if (!st || (st.toLowerCase && st.toLowerCase() !== 'watching')) needsWatching = true;
       } catch(_) {}
