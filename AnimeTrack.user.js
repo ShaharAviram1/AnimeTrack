@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.5.9
+// @version      1.6.0
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -659,7 +659,7 @@ function seasonVariants(base){
     return res.access_token;
   }
   async function malSearch(query){
-    const url = MAL_SEARCH + '?q=' + encodeURIComponent(query) + '&limit=8&fields=id,title,mean,media_type,alternative_titles';
+    const url = MAL_SEARCH + '?q=' + encodeURIComponent(query) + '&limit=8&fields=id,title,mean,media_type,alternative_titles,num_episodes';
     try {
       const res = await new Promise((resolve) => {
         gm.xmlHttpRequest({
@@ -868,17 +868,25 @@ function seasonVariants(base){
         let inter = 0; for (const tok of gTokens) if (nTokens.has(tok)) inter++;
         const overlap = inter / Math.max(1, Math.min(gTokens.size, nTokens.size));
         s = Math.max(s, Math.floor(overlap * 80));
-        // Media-type preferences
+        // Media-type preferences + One Piece heuristics
         if (s >= 0) {
-          if (node.media_type === 'tv') s += 10; // stronger bias for long-running series
+          if (node.media_type === 'tv') s += 12;
           else if (node.media_type === 'ona') s += 2;
-          else if (node.media_type === 'ova' || node.media_type === 'special' || node.media_type === 'movie') s -= 20;
+          else if (node.media_type === 'ova' || node.media_type === 'special' || node.media_type === 'movie') s -= 50;
         }
-        // Strong tie-break for One Piece main TV series vs movies/specials/live-action
         if (gNorm.startsWith('one piece')){
           const titleNorm = normalizeCmp(node.title || '');
-          if (node.id === 21) s += 80; // MAL ID 21 is the main One Piece anime
-          else if (titleNorm === 'one piece' && node.media_type !== 'tv') s -= 40; // push away non-TV "One Piece"
+          // Prefer main TV entry (MAL id 21)
+          if (node.id === 21) s += 120;
+          // Penalize obvious non-series variants
+          if (/\b(movie|film|special)\b/.test(titleNorm)) s -= 60;
+          // Episode-count hint: long-running series vs short movies/specials
+          if (typeof node.num_episodes === 'number') {
+            if (node.num_episodes >= 500) s += 60;
+            else if (node.num_episodes <= 20) s -= 40;
+          }
+          // If exact base title but wrong media type, push it down
+          if (titleNorm === 'one piece' && node.media_type !== 'tv') s -= 60;
         }
         best = Math.max(best, s);
       }
