@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.6.0
+// @version      1.6.1
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -659,7 +659,7 @@ function seasonVariants(base){
     return res.access_token;
   }
   async function malSearch(query){
-    const url = MAL_SEARCH + '?q=' + encodeURIComponent(query) + '&limit=8&fields=id,title,mean,media_type,alternative_titles,num_episodes';
+    const url = MAL_SEARCH + '?q=' + encodeURIComponent(query) + '&limit=20&fields=id,title,mean,media_type,alternative_titles,num_episodes';
     try {
       const res = await new Promise((resolve) => {
         gm.xmlHttpRequest({
@@ -876,17 +876,19 @@ function seasonVariants(base){
         }
         if (gNorm.startsWith('one piece')){
           const titleNorm = normalizeCmp(node.title || '');
-          // Prefer main TV entry (MAL id 21)
-          if (node.id === 21) s += 120;
+          // Prefer main TV entry (MAL id 21) very strongly
+          if (node.id === 21) s += 300;
+          // Penalize Netflix live-action (MAL id 55644) explicitly
+          if (node.id === 55644) s -= 200;
           // Penalize obvious non-series variants
-          if (/\b(movie|film|special)\b/.test(titleNorm)) s -= 60;
+          if (/\b(movie|film|special)\b/.test(titleNorm)) s -= 80;
           // Episode-count hint: long-running series vs short movies/specials
           if (typeof node.num_episodes === 'number') {
-            if (node.num_episodes >= 500) s += 60;
-            else if (node.num_episodes <= 20) s -= 40;
+            if (node.num_episodes >= 500) s += 80;
+            else if (node.num_episodes <= 20) s -= 60;
           }
           // If exact base title but wrong media type, push it down
-          if (titleNorm === 'one piece' && node.media_type !== 'tv') s -= 60;
+          if (titleNorm === 'one piece' && node.media_type !== 'tv') s -= 80;
         }
         best = Math.max(best, s);
       }
@@ -897,6 +899,12 @@ function seasonVariants(base){
       const node = x.node || x;
       const s = score(node);
       if (s > bestScore){ bestScore = s; bestNode = node; }
+    }
+    // Final One Piece safeguard: if query starts with one piece and id 21 is present, force it
+    if (gNorm.startsWith('one piece')){
+      const list = Array.isArray(data) ? data : [];
+      const found = list.map(x => x && (x.node || x)).find(n => n && n.id === 21);
+      if (found) return found;
     }
     return bestNode || (data[0] && (data[0].node || data[0])) || null;
   }
