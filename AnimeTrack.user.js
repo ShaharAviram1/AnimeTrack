@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.5.5
+// @version      1.5.6
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -682,16 +682,39 @@ function seasonVariants(base){
   }
   async function getMyListStatus(malAnimeId){
     const token = await ensureFreshToken();
-    const url = `https://api.myanimelist.net/v2/anime/${encodeURIComponent(malAnimeId)}/my_list_status`;
-    return new Promise((resolve) => {
+    const base = `https://api.myanimelist.net/v2/anime/${encodeURIComponent(malAnimeId)}`;
+
+    const gmGet = (url, headers) => new Promise((resolve) => {
       gm.xmlHttpRequest({
         method: 'GET',
         url,
-        headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' },
-        onload: (r) => { try { resolve(JSON.parse(r.responseText)); } catch { resolve(null); } },
-        onerror: () => resolve(null)
+        headers,
+        onload: (r) => {
+          let body = null;
+          try { body = r.responseText ? JSON.parse(r.responseText) : null; } catch {}
+          resolve({ status: r.status, body });
+        },
+        onerror: () => resolve({ status: 0, body: null })
       });
     });
+
+    // Try 1: dedicated my_list_status endpoint with Bearer
+    let resp = await gmGet(`${base}/my_list_status`, { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' });
+    if (resp.body && (resp.body.status || typeof resp.body.num_watched_episodes === 'number')) return resp.body;
+
+    // Try 2: same endpoint but add X-MAL-CLIENT-ID as a nudge
+    if (!resp.body || !(resp.body.status || typeof resp.body.num_watched_episodes === 'number')) {
+      resp = await gmGet(`${base}/my_list_status`, { 'Authorization': `Bearer ${token}`, 'X-MAL-CLIENT-ID': MAL_CLIENT_ID, 'Accept': 'application/json' });
+      if (resp.body && (resp.body.status || typeof resp.body.num_watched_episodes === 'number')) return resp.body;
+    }
+
+    // Try 3: fetch the anime with fields=my_list_status and extract
+    resp = await gmGet(`${base}?fields=my_list_status`, { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' });
+    if (resp.body && resp.body.my_list_status) return resp.body.my_list_status;
+
+    // Not in list or unavailable
+    dlog('getMyListStatus: no list status available; maybe not in list yet');
+    return null;
   }
   async function setMyStatusWatching(malAnimeId){
     const token = await ensureFreshToken();
@@ -999,6 +1022,9 @@ function seasonVariants(base){
     const mappedLine = mapped && mapped.id ? `${mapped.title || 'Mapped'} (#${mapped.id})` : '—';
     const lastErr = await gm.getValue(STORAGE.oauthErr, '');
 
+    const statusText = (authed && mapped && mapped.id) ? ((myStatus && myStatus.status) ? myStatus.status : 'Not in list') : '—';
+    const watchedText = (authed && mapped && typeof watchedCount === 'number') ? String(watchedCount) : '—';
+
     card.innerHTML = `
       <div class="title">AnimeTrack</div>
 
@@ -1030,13 +1056,13 @@ function seasonVariants(base){
       ${(!onMAL && authed && mapped && mapped.id) ? `
       <div class="row">
         <span class="sub">Status:</span>
-        <span class="sub" id="at-statline">${myStatus && myStatus.status ? myStatus.status : '—'}</span>
+        <span class="sub" id="at-statline">${statusText}</span>
         <div style="flex:1"></div>
         ${needsWatching ? '<button id="at-setwatch" class="primary">Set to Watching</button>' : ''}
       </div>
       <div class="row">
         <span class="sub">Watched:</span>
-        <span class="sub" id="at-wcount">${(watchedCount!=null)? watchedCount : '—'}</span>
+        <span class="sub" id="at-wcount">${watchedText}</span>
       </div>
       ` : ``}
 
