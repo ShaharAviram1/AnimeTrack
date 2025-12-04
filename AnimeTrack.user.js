@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.5.4
+// @version      1.5.5
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -230,6 +230,12 @@
     setTimeout(()=> t.remove(), 2600);
   }
   function isAnimeyPage(){ const p = location.pathname.toLowerCase(); return /anime|watch|episode|series|ep|stream/.test(p); }
+  function isHomePage(){
+    const p = (location.pathname || '/').replace(/\/+$/,'/');
+    if (p === '/' || p === '/home' || p === '/index' || p === '/index.html') return true;
+    if (p === '/' && location.search) return true;
+    return false;
+  }
 
   // ---- Storage helpers ----
   async function getJSON(key, fallback){ try { const raw = await gm.getValue(key, ''); return raw ? JSON.parse(raw) : fallback; } catch { return fallback; } }
@@ -750,6 +756,7 @@ function seasonVariants(base){
   function getSeriesKey(){
     const host = location.host.replace(/^www\./i,'').toLowerCase();
     dlog('getSeriesKey: start host=', host);
+    if (isHomePage()) { dlog('getSeriesKey: homepage → unresolved'); return host + '|unresolved'; }
     // 1) Prefer canonical from og:url if available
     const og = (function(){ try { return qs('meta[property="og:url"]')?.content || qs('meta[name="twitter:url"]')?.content; } catch { return ''; } })();
     dlog('getSeriesKey: og url =', og);
@@ -838,6 +845,7 @@ function seasonVariants(base){
   }
   async function ensureAutoMappingIfNeeded(){
     dlog('ensureAutoMappingIfNeeded: start');
+    if (isHomePage()) { dlog('ensureAutoMappingIfNeeded: homepage → skip'); return null; }
     const key = getSeriesKey();
     const mapped = await getMap(key);
     dlog('ensureAutoMappingIfNeeded: key=', key, 'mapped=', mapped);
@@ -870,7 +878,7 @@ function seasonVariants(base){
     const host = location.hostname;
     let enabled = false;
     try { enabled = await isSiteEnabled(host); } catch {}
-    const show = isMAL() || enabled || SEEDED_HOSTS.has(host) || isAnimeyPage();
+    const show = isMAL() || enabled || (isAnimeyPage() && !isHomePage());
     bubble.style.display = show ? 'flex' : 'none';
     bubble.classList.toggle('disabled', !enabled && !isMAL());
     bubble.title = isMAL() ? 'AnimeTrack — MyAnimeList' :
@@ -964,9 +972,17 @@ function seasonVariants(base){
     const authed = !!token;
     const onMAL = isMAL();
     const enabled = onMAL ? true : await isSiteEnabled(host);
-    const seriesKey = getSeriesKey();
-    const mapped = onMAL ? null : (await getMap(seriesKey) || await ensureAutoMappingIfNeeded());
-    const epGuess = onMAL ? null : guessEpisode();
+    const onHome = isHomePage();
+    if (onHome && !onMAL) {
+      card.innerHTML = `
+        <div class="title">AnimeTrack</div>
+        <div class="row"><span class="sub">Tip:</span><span>Open an episode page to detect the show.</span></div>
+      `;
+      return;
+    }
+    const seriesKey = onHome ? (location.host.replace(/^www\./i,'').toLowerCase() + '|unresolved') : getSeriesKey();
+    const mapped = (onMAL || onHome) ? null : (await getMap(seriesKey) || await ensureAutoMappingIfNeeded());
+    const epGuess = (onMAL || onHome) ? null : guessEpisode();
 
     // Fetch status BEFORE computing alreadyWatched to avoid TDZ/undefined issues
     let myStatus = null; let watchedCount = null; let needsWatching = false;
