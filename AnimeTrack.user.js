@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.6.1
+// @version      1.6.2
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -103,10 +103,26 @@
   , pkceVer: 'animetrack.pkce_ver'
   ,oauthState:'animetrack.oauthState'
   ,expires:'animetrack.expires'
+  , canon:  'animetrack.franchiseCanon'
   };
   const SEEDED_HOSTS = new Set([
     '9anime.to','aniwatch.to','aniwatchtv.to','gogoanime.dk','gogoanime.fi','gogoanimehd.to','hianime.to','hianime.tv','zoro.to'
   ]);
+  // Soft scoring priors per franchise base (no hard MAL IDs)
+  const FRANCHISE_PRIORS = {
+    'one piece': { prefer: 'tv', minEpisodes: 100 },
+    'detective conan': { prefer: 'tv', minEpisodes: 100 },
+    'bleach': { prefer: 'tv', minEpisodes: 50 },
+    'gintama': { prefer: 'tv', minEpisodes: 50 },
+    'naruto': { prefer: 'tv', minEpisodes: 50 },
+    'dragon ball': { prefer: 'tv', minEpisodes: 50 }
+  };
+
+  function priorFor(base){
+    if (!base) return null;
+    // try exact base, then without discriminators
+    return FRANCHISE_PRIORS[base] || FRANCHISE_PRIORS[baseFranchise(base)];
+  }
 
   // ---- Utils ----
   const qsa = (s, r=document) => Array.from(r.querySelectorAll(s));
@@ -535,6 +551,82 @@ function seasonVariants(base){
   }
   return Array.from(out).filter(x=>x && x.length>1);
 }
+function baseFranchise(title){
+  // Normalize to a “core” franchise key: strip years, season/cour/part markers, ep numbers, punctuation
+  let s = (title||'').toLowerCase();
+  s = s.normalize('NFKD').replace(/[\u0300-\u036f]/g,'');
+  s = s.replace(/\b(tv|anime|official site)\b/g,'');
+  s = s.replace(/\b(episode|ep|e)\s*\d+\b/g,'');
+  s = s.replace(/\bpart\s*\d+\b/g,'');
+  s = s.replace(/\bcour\s*\d+\b/g,'');
+  s = s.replace(/\bseason\s*\d+\b/g,'');
+  s = s.replace(/\bs\s*\d+\b/g,'');
+  s = s.replace(/\b(19|20)\d{2}\b/g,'');
+  s = s.replace(/[-_]+/g,' ');
+  s = s.replace(/[^a-z0-9 ]+/g,' ');
+  s = s.replace(/\s{2,}/g,' ').trim();
+  return s;
+}
+
+// Tokens that distinguish sub-series within a franchise (don't collapse away)
+const FRANCHISE_DISCRIM_TOKENS = [
+  'z','kai','shippuden','brotherhood','super','final season',
+  '64','2011','remake','kings arc','part 2','part 3'
+];
+
+function baseFranchiseWithDiscriminators(title){
+  // Start from the existing base
+  const core = baseFranchise(title);
+  if (!core) return core;
+
+  // Build a normalized token string to search
+  const norm = normalizeCmp(title);
+
+  // Collect discriminator tokens present in the title (in stable order, no dups)
+  const seen = new Set();
+  const picks = [];
+  for (const tok of FRANCHISE_DISCRIM_TOKENS) {
+    const t = normalizeCmp(tok);
+    // require full token boundary match
+    const re = new RegExp('\\b' + t.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\$&') + '\\b', 'i');
+    if (re.test(norm) && !seen.has(t)) { seen.add(t); picks.push(tok.toLowerCase()); }
+  }
+
+  if (!picks.length) return core;
+
+  // Attach discriminators to core; keep short and stable
+  return (core + ' ' + picks.join(' ')).trim();
+}
+
+async function getCanonMap(){
+  try { const raw = await gm.getValue(STORAGE.canon, ''); return raw ? JSON.parse(raw) : {}; } catch { return {}; }
+}
+async function setCanonMap(m){
+  try { await gm.setValue(STORAGE.canon, JSON.stringify(m||{})); } catch {}
+}
+async function rememberCanon(franchiseBase, malId, malTitle){
+  if (!franchiseBase || !malId) return;
+  const m = await getCanonMap();
+  // only set if empty or confirming same id; avoid flapping
+  if (!m[franchiseBase] || m[franchiseBase] === malId) {
+    m[franchiseBase] = malId;
+    await setCanonMap(m);
+    dlog('canon remember:', franchiseBase, '→', malId, malTitle||'');
+  }
+}
+
+function titlesOf(node){
+  const alts = [];
+  if (!node) return alts;
+  if (node.title) alts.push(node.title);
+  const at = node.alternative_titles || {};
+  ['en','en_jp','ja','ja_jp','synonyms'].forEach(k => {
+    const v = at[k];
+    if (Array.isArray(v)) v.forEach(x => alts.push(x));
+    else if (typeof v === 'string') alts.push(v);
+  });
+  return alts.filter(Boolean);
+}
   function fromOgUrlSlug(){
     try{
       const u = qs('meta[property="og:url"]')?.content || qs('meta[name="twitter:url"]')?.content;
@@ -839,18 +931,6 @@ function seasonVariants(base){
     const gRaw = guess || '';
     const gNorm = normalizeCmp(gRaw);
 
-    function titlesOf(node){
-      const alts = [];
-      if (!node) return alts;
-      if (node.title) alts.push(node.title);
-      const at = node.alternative_titles || {};
-      ['en','en_jp','ja','ja_jp','synonyms'].forEach(k => {
-        const v = at[k];
-        if (Array.isArray(v)) v.forEach(x => alts.push(x));
-        else if (typeof v === 'string') alts.push(v);
-      });
-      return alts.filter(Boolean);
-    }
     function score(node){
       const all = titlesOf(node);
       if (!all.length) return -1;
@@ -868,44 +948,69 @@ function seasonVariants(base){
         let inter = 0; for (const tok of gTokens) if (nTokens.has(tok)) inter++;
         const overlap = inter / Math.max(1, Math.min(gTokens.size, nTokens.size));
         s = Math.max(s, Math.floor(overlap * 80));
-        // Media-type preferences + One Piece heuristics
+        // Generic media-type and length preferences (franchise-agnostic)
         if (s >= 0) {
-          if (node.media_type === 'tv') s += 12;
-          else if (node.media_type === 'ona') s += 2;
-          else if (node.media_type === 'ova' || node.media_type === 'special' || node.media_type === 'movie') s -= 50;
-        }
-        if (gNorm.startsWith('one piece')){
-          const titleNorm = normalizeCmp(node.title || '');
-          // Prefer main TV entry (MAL id 21) very strongly
-          if (node.id === 21) s += 300;
-          // Penalize Netflix live-action (MAL id 55644) explicitly
-          if (node.id === 55644) s -= 200;
-          // Penalize obvious non-series variants
-          if (/\b(movie|film|special)\b/.test(titleNorm)) s -= 80;
-          // Episode-count hint: long-running series vs short movies/specials
+          // Prefer TV series strongly, lightly prefer ONA, penalize movies/specials/OVA
+          if (node.media_type === 'tv') s += 14;
+          else if (node.media_type === 'ona') s += 3;
+          else if (node.media_type === 'ova' || node.media_type === 'special' || node.media_type === 'movie') s -= 35;
+
+          // Length bias
           if (typeof node.num_episodes === 'number') {
-            if (node.num_episodes >= 500) s += 80;
-            else if (node.num_episodes <= 20) s -= 60;
+            if (node.num_episodes >= 100) s += 30;
+            else if (node.num_episodes >= 50) s += 15;
+            else if (node.num_episodes <= 20) s -= 15;
+            else if (node.num_episodes <= 5)  s -= 25;
           }
-          // If exact base title but wrong media type, push it down
-          if (titleNorm === 'one piece' && node.media_type !== 'tv') s -= 80;
+
+          // Franchise base with discriminators for both guess and candidate titles
+          const gBase = baseFranchiseWithDiscriminators(gRaw);
+          if (gBase) {
+            const candBases = titlesOf(node).map(baseFranchiseWithDiscriminators).filter(Boolean);
+            const baseHit = candBases.some(b => b === gBase);
+            if (baseHit) {
+              if (node.media_type === 'tv') s += 40;
+              if (typeof node.num_episodes === 'number' && node.num_episodes >= 100) s += 25;
+              if (node.media_type === 'movie' || node.media_type === 'special' || node.media_type === 'ova') s -= 40;
+
+              // Soft priors: prefer TV and ensure min episodes if declared
+              const pr = priorFor(gBase);
+              if (pr) {
+                if (pr.prefer === 'tv') {
+                  if (node.media_type === 'tv') s += 20; else s -= 20;
+                }
+                if (typeof pr.minEpisodes === 'number' && typeof node.num_episodes === 'number') {
+                  if (node.num_episodes >= pr.minEpisodes) s += 20;
+                  else s -= 15;
+                }
+              }
+            }
+          }
         }
         best = Math.max(best, s);
       }
       return best;
     }
     let bestNode = null, bestScore = -1;
+    let secondBest = -1;
     for (const x of data){
       const node = x.node || x;
       const s = score(node);
-      if (s > bestScore){ bestScore = s; bestNode = node; }
+      if (s > bestScore){ secondBest = bestScore; bestScore = s; bestNode = node; }
+      else if (s > secondBest){ secondBest = s; }
     }
-    // Final One Piece safeguard: if query starts with one piece and id 21 is present, force it
-    if (gNorm.startsWith('one piece')){
-      const list = Array.isArray(data) ? data : [];
-      const found = list.map(x => x && (x.node || x)).find(n => n && n.id === 21);
-      if (found) return found;
-    }
+    pickBestMatch._last = { bestScore, secondBest };
+    // Learn canonical mapping for this franchise if this looks like the core TV entry
+    try {
+      const gBase = baseFranchise(gRaw);
+      const chosen = bestNode || (data[0] && (data[0].node || data[0])) || null;
+      const conf = (pickBestMatch._last && pickBestMatch._last.bestScore) || -1;
+      if (gBase && chosen && chosen.media_type === 'tv'
+          && typeof chosen.num_episodes === 'number' && chosen.num_episodes >= 50
+          && conf >= 120) {
+        rememberCanon(gBase, chosen.id, chosen.title);
+      }
+    } catch(_) {}
     return bestNode || (data[0] && (data[0].node || data[0])) || null;
   }
   async function ensureAutoMappingIfNeeded(){
@@ -917,6 +1022,19 @@ function seasonVariants(base){
     if (mapped && mapped.id) return mapped;
     const guess = guessTitle();
     dlog('ensureAutoMappingIfNeeded: guess=', guess);
+    // If we already learned a canonical id for this franchise, try to reuse it directly
+    const base = baseFranchise(guess||'');
+    if (base) {
+      try {
+        const canon = await getCanonMap();
+        const canonId = canon[base];
+        if (canonId) {
+          dlog('ensureAutoMappingIfNeeded: using learned canon for', base, '→', canonId);
+          await setMap(key, canonId, guess);
+          return { id: canonId, title: guess };
+        }
+      } catch(_) {}
+    }
     if (!guess || guess.length < 2) return null;
     let picked = null, data = [];
     const cands = seasonVariants(guess);
@@ -925,10 +1043,18 @@ function seasonVariants(base){
       const res = await malSearch(q);
       data = (res && res.data) || [];
       dlog('ensureAutoMappingIfNeeded: search q=', q, 'results=', data && data.length);
-      if (data.length){
-        picked = pickBestMatch(data, q);
-        if (picked) break;
-      }
+      if (!data.length) continue;
+
+      picked = pickBestMatch(data, q);
+      const conf = (pickBestMatch._last && pickBestMatch._last.bestScore) || -1;
+      const gap  = (pickBestMatch._last && pickBestMatch._last.secondBest != null)
+                   ? (pickBestMatch._last.bestScore - pickBestMatch._last.secondBest)
+                   : -1;
+      dlog('ensureAutoMappingIfNeeded: bestScore=', conf, 'gap=', gap);
+
+      // Accept only if clearly ahead; otherwise try next variant
+      if (conf >= 120 && gap >= 30) break;
+      // If nothing else left, keep this as fallback
     }
     if (picked) dlog('ensureAutoMappingIfNeeded: picked=', picked && {id:picked.id, title:picked.title});
     if (!picked){ toast('Title not found. Use search to map.'); return null; }
