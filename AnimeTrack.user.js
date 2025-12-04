@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.5.6
+// @version      1.5.6.1
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -854,6 +854,13 @@ function seasonVariants(base){
         s = Math.max(s, Math.floor(overlap * 80));
         // prefer TV when on streaming sites
         if ((node.media_type === 'tv' || node.media_type === 'ona') && s >= 0) s += 3;
+        // Strong tie-break for One Piece main TV series
+        if (gNorm.startsWith('one piece')){
+          const titleNorm = normalizeCmp(node.title || '');
+          if (titleNorm === 'one piece' && node.media_type === 'tv') {
+            s += 50; // heavily prefer the main TV entry over movies/specials
+          }
+        }
         best = Math.max(best, s);
       }
       return best;
@@ -1014,7 +1021,7 @@ function seasonVariants(base){
         myStatus = await getMyListStatus(mapped.id);
         if (myStatus && typeof myStatus.num_watched_episodes === 'number') watchedCount = myStatus.num_watched_episodes;
         const st = (myStatus && myStatus.status) || '';
-        if (st && st.toLowerCase && st.toLowerCase() !== 'watching') needsWatching = true;
+        if (!st || (st.toLowerCase && st.toLowerCase() !== 'watching')) needsWatching = true;
       } catch(_) {}
     }
 
@@ -1358,6 +1365,14 @@ function seasonVariants(base){
         }
         try {
           await updateMyListEpisodes(m.id, ep);
+          // Refresh watched count immediately
+          try {
+            const st2 = await getMyListStatus(m.id);
+            if (st2 && typeof st2.num_watched_episodes === 'number') {
+              const wEl = card.querySelector('#at-wcount');
+              if (wEl) wEl.textContent = String(st2.num_watched_episodes);
+            }
+          } catch {}
           toast('Marked ep ' + ep + ' watched.');
           await renderPanel();
         } catch(e) { toast('Update failed: ' + (e && e.message || e)); }
