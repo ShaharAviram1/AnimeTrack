@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.6.2
+// @version      1.6.3
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -751,7 +751,9 @@ function titlesOf(node){
     return res.access_token;
   }
   async function malSearch(query){
-    const url = MAL_SEARCH + '?q=' + encodeURIComponent(query) + '&limit=20&fields=id,title,mean,media_type,alternative_titles,num_episodes';
+    const url = MAL_SEARCH + '?q=' + encodeURIComponent(query)
+      + '&limit=50&nsfw=true&fields='
+      + encodeURIComponent('id,title,alternative_titles,media_type,num_episodes,start_date,end_date');
     try {
       const res = await new Promise((resolve) => {
         gm.xmlHttpRequest({
@@ -939,6 +941,13 @@ function titlesOf(node){
       for (const t of all){
         const n = normalizeCmp(t);
         if (!n) continue;
+        // If any MAL alternative title / synonym matches strongly, boost hard
+        if (n === gNorm) return 140; // exact normalized alt-title match (decisive)
+        if (gNorm.includes(n) && n.length >= 8) {
+          // candidate alt-title fully inside our long guess (e.g., slug)
+          // longer contained alt-title -> stronger signal
+          return Math.max(120, n.length >= 14 ? 130 : 120);
+        }
         if (n === gNorm) return 100;                  // exact normalized
         let s = -1;
         if (n.startsWith(gNorm)) s = Math.max(s, 82);
@@ -1039,6 +1048,34 @@ function titlesOf(node){
     let picked = null, data = [];
     const cands = seasonVariants(guess);
     dlog('ensureAutoMappingIfNeeded: cands=', cands);
+    // Expand with high-signal phrases extracted from the long title
+    (function(){
+      const base = cleanTitle(guess).toLowerCase();
+      const tokens = base.split(/[^a-z0-9]+/).filter(x => x && x.length > 1);
+      const STOP = new Set([
+        'the','a','an','of','for','to','in','and','or','on','at','by','with',
+        'my','i','am','im','episode','ep','season','part','cour','level','lvl','lv'
+      ]);
+      const words = tokens.filter(w => !STOP.has(w));
+      const phrases = new Set();
+
+      // build bi-grams and tri-grams
+      for (let i=0; i<words.length; i++){
+        if (i+1 < words.length) phrases.add(words[i] + ' ' + words[i+1]);
+        if (i+2 < words.length) phrases.add(words[i] + ' ' + words[i+1] + ' ' + words[i+2]);
+      }
+
+      // pick a few high-signal phrases likely to appear in MAL alt titles
+      const extras = [];
+      phrases.forEach(p => {
+        if (/gacha/.test(p)) extras.push(p);
+        else if (/(dungeon|labyrinth)/.test(p)) extras.push(p);
+        else if (/(revenge|backstab)/.test(p)) extras.push(p);
+      });
+
+      // cap to a small set so we don't spam MAL (order preserved)
+      extras.slice(0, 4).forEach(p => cands.push(titleCase(p)));
+    })();
     for (const q of cands){
       const res = await malSearch(q);
       data = (res && res.data) || [];
