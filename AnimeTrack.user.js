@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.6.6
+// @version      1.6.7
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -778,6 +778,82 @@ function titlesOf(node){
       return res;
     } catch { return null; }
   }
+  // Helper: unique-by-id merge of MAL candidates (handles {node:{id,...}} or {id,...})
+  function _uniqById(arr){
+    const seen = new Set(); const out = [];
+    for (const x of arr||[]){
+      const n = x && (x.node || x);
+      if (!n || !n.id) continue;
+      if (seen.has(n.id)) continue;
+      seen.add(n.id); out.push(x);
+    }
+    return out;
+  }
+
+  // Build recall-friendly variants for MAL search (to cope with long streaming slugs)
+  function buildSearchVariants(guess){
+    const variants = [];
+    const exact = preferExactTitle(guess);
+    variants.push(exact);
+
+    // #1 core (strip season/part/cour, years)
+    const core = stripSeasonPhrases(cleanTitle(exact));
+    if (core && core !== exact) variants.push(core);
+
+    // #2 drop after colon/dash/comma (marketing tails) — progressively shorter
+    const cuts = [':','—','-','–',','].map(sep => exact.split(sep)[0].trim()).filter(Boolean);
+    for (const c of cuts) if (c.length >= 6 && !variants.includes(c)) variants.push(c);
+
+    // #3 keep strong tokens only (words >= 3 chars or digits), limit to first 6–9 tokens
+    const toks = normalizeCmp(exact).split(' ').filter(t => t.length >= 3 || /^\\d+$/.test(t));
+    if (toks.length >= 3){
+      const compact6 = toks.slice(0, 6).join(' ');
+      const compact9 = toks.slice(0, 9).join(' ');
+      if (!variants.includes(compact6)) variants.push(compact6);
+      if (!variants.includes(compact9)) variants.push(compact9);
+    }
+
+    // De-dup and keep meaningful
+    return Array.from(new Set(variants)).filter(v => v && v.length >= 3);
+  }
+
+  // Robust search: try variants, handle 429/5xx with short backoff, merge results
+  async function malSearchMulti(guess){
+    const queries = buildSearchVariants(guess);
+    let merged = [];
+    for (const q of queries){
+      const url = MAL_SEARCH + '?q=' + encodeURIComponent(q)
+        + '&limit=50&nsfw=true&fields='
+        + encodeURIComponent('id,title,alternative_titles,media_type,num_episodes,start_date,end_date');
+
+      const res = await new Promise((resolve) => {
+        gm.xmlHttpRequest({
+          method: 'GET',
+          url,
+          headers: { 'X-MAL-CLIENT-ID': MAL_CLIENT_ID },
+          onload: (r)=>{
+            try {
+              // Basic backoff on 429/5xx
+              if (r.status === 429 || (r.status >= 500 && r.status < 600)) {
+                setTimeout(()=>resolve({ data: [] }), 400);
+                return;
+              }
+              resolve(JSON.parse(r.responseText || '{"data":[]}'));
+            } catch { resolve({ data: [] }); }
+          },
+          onerror: ()=> resolve({ data: [] })
+        });
+      });
+
+      const data = (res && res.data) || [];
+      dlog('malSearchMulti: q=', q, '→', data.length);
+      merged = _uniqById(merged.concat(data));
+
+      // Early success: plenty of candidates
+      if (merged.length >= 30) break;
+    }
+    return merged;
+  }
   async function updateMyListEpisodes(malAnimeId, watchedEp){
     const token = await ensureFreshToken();
     const url = `https://api.myanimelist.net/v2/anime/${encodeURIComponent(malAnimeId)}/my_list_status`;
@@ -1070,28 +1146,29 @@ function titlesOf(node){
       } catch(_) {}
     }
     if (!guess || guess.length < 2) return null;
-    let picked = null, data = [];
-    // Search order: exact title first, then relaxed variants
-    const cands = [preferExactTitle(guess), ...seasonVariants(guess)];
-    dlog('ensureAutoMappingIfNeeded: cands=', cands);
-    for (const q of cands){
-      const res = await malSearch(q);
-      data = (res && res.data) || [];
-      dlog('ensureAutoMappingIfNeeded: search q=', q, 'results=', data && data.length);
-      if (!data.length) continue;
+    let picked = null;
+    const merged = await malSearchMulti(guess);
+    dlog('ensureAutoMappingIfNeeded: merged candidates =', merged.length);
 
-      picked = pickBestMatch(data, q);
+    if (merged.length){
+      picked = pickBestMatch(merged, guess);
       const conf = (pickBestMatch._last && pickBestMatch._last.bestScore) || -1;
       const gap  = (pickBestMatch._last && pickBestMatch._last.secondBest != null)
                    ? (pickBestMatch._last.bestScore - pickBestMatch._last.secondBest)
                    : -1;
       dlog('ensureAutoMappingIfNeeded: bestScore=', conf, 'gap=', gap);
 
-      // Accept only if clearly ahead; otherwise try next variant
-      if (conf >= 125 && gap >= 35) break;
-      // If nothing else left, keep this as fallback
+      // Easier gate for decisive title/alt-title hits; otherwise original strict gate
+      const decisive = (conf >= 138);  // exact alt/title (150) or strong containment (≈138)
+      if (!(decisive && gap >= 10) && !(conf >= 125 && gap >= 35)) {
+        dlog('ensureAutoMappingIfNeeded: gate not met; keeping but not confident');
+      }
     }
-    if (picked) dlog('ensureAutoMappingIfNeeded: picked=', picked && {id:picked.id, title:picked.title});
+    if (picked) {
+      const last = pickBestMatch._last || {};
+      dlog('ensureAutoMappingIfNeeded: PICK', { id: picked.id, title: picked.title, score: last.bestScore, gap: (last.bestScore - last.secondBest) });
+      dlog('ensureAutoMappingIfNeeded: picked=', picked && {id:picked.id, title:picked.title});
+    }
     if (!picked){ toast('Title not found. Use search to map.'); return null; }
     await setMap(key, picked.id, picked.title);
     return { id: picked.id, title: picked.title };
