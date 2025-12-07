@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.6.8
+// @version      1.6.9
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -495,6 +495,7 @@ function normalizeCmp(s){
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '')     // strip diacritics
     .replace(/[^a-z0-9]+/g, ' ')         // collapse non-alnum
+    .replace(/\b0+(\d+)\b/g, '$1')        // normalize leading-zero numbers ("01" -> "1")
     .replace(/\b(tv|anime|official site)\b/g, '')
     .replace(/\s+/g,' ')
     .trim();
@@ -805,6 +806,18 @@ function titlesOf(node){
     return out;
   }
 
+  // Helper: produce a zero-padded movie/film index variant (e.g., "Movie 1" -> "Movie 01")
+  function withZeroPaddedMovieIndex(title){
+    if (!title) return null;
+    const m = String(title).match(/\b(movie|film)\s*(\d{1,2})\b/i);
+    if (!m) return null;
+    const idx = parseInt(m[2], 10);
+    if (!(idx >= 1 && idx <= 9)) return null; // only pad 1..9
+    const padded = m[1] + ' ' + ('0' + idx); // keep original keyword casing
+    // replace only the matched portion
+    return title.slice(0, m.index) + padded + title.slice(m.index + m[0].length);
+  }
+
   // Build recall-friendly variants for MAL search (to cope with long streaming slugs)
   function buildSearchVariants(guess){
     const variants = [];
@@ -820,13 +833,17 @@ function titlesOf(node){
     for (const c of cuts) if (c.length >= 6 && !variants.includes(c)) variants.push(c);
 
     // #3 keep strong tokens only (words >= 3 chars or digits), limit to first 6–9 tokens
-    const toks = normalizeCmp(exact).split(' ').filter(t => t.length >= 3 || /^\\d+$/.test(t));
+    const toks = normalizeCmp(exact).split(' ').filter(t => t.length >= 3 || /^\d+$/.test(t));
     if (toks.length >= 3){
       const compact6 = toks.slice(0, 6).join(' ');
       const compact9 = toks.slice(0, 9).join(' ');
       if (!variants.includes(compact6)) variants.push(compact6);
       if (!variants.includes(compact9)) variants.push(compact9);
     }
+
+    // #4 zero-padded movie index variant (e.g., "Movie 1" -> "Movie 01")
+    const zp = withZeroPaddedMovieIndex(exact);
+    if (zp && !variants.includes(zp)) variants.push(zp);
 
     // De-dup and keep meaningful
     return Array.from(new Set(variants)).filter(v => v && v.length >= 3);
