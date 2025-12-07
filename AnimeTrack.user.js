@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.6.7
+// @version      1.6.8
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -488,7 +488,7 @@
     t = t.replace(/\s{2,}/g,' ');
     return t.trim();
   }
-  // --- MAL-Sync-inspired title normalization helpers ---
+// --- MAL-Sync-inspired title normalization helpers ---
 function normalizeCmp(s){
   return (s||'')
     .toLowerCase()
@@ -538,6 +538,21 @@ function stripSeasonPhrases(s){
     .replace(/\bseason\s*\d{1,2}\b/ig,'')
     .replace(/\bs\s*\d{1,2}\b/ig,'')
     .replace(/\s{2,}/g,' ').trim();
+}
+function detectMovieIndexFromGuess(s){
+  if (!s) return null;
+  const m = String(s).toLowerCase().match(/\b(?:movie|film)\s*(\d{1,2})\b/);
+  return m ? parseInt(m[1],10) : null;
+}
+function candidateMovieIndexFromTitles(node){
+  try{
+    const arr = titlesOf(node) || [];
+    for (const t of arr){
+      const m = String(t).toLowerCase().match(/\b(?:movie|film)\s*(\d{1,2})\b/);
+      if (m) return parseInt(m[1],10);
+    }
+  }catch{}
+  return null;
 }
 function seasonVariants(base){
   const out = new Set();
@@ -1056,17 +1071,27 @@ function titlesOf(node){
         }
         // Generic media-type and length preferences (franchise-agnostic)
         if (s >= 0) {
-          // Prefer TV series strongly, lightly prefer ONA, penalize movies/specials/OVA
-          if (node.media_type === 'tv') s += 14;
-          else if (node.media_type === 'ona') s += 3;
-          else if (node.media_type === 'ova' || node.media_type === 'special' || node.media_type === 'movie') s -= 35;
+          // If the guess indicates a MOVIE (e.g., "... movie 1"), invert the usual TV bias
+          const wantedMovieIdx = detectMovieIndexFromGuess(gRaw);
+          const movieWanted = /\b(movie|film)\b/i.test(gRaw) || (wantedMovieIdx != null);
 
-          // Length bias
+          if (movieWanted) {
+            if (node.media_type === 'movie') s += 28; else s -= 22;
+          } else {
+            // Default (series-first) bias
+            if (node.media_type === 'tv') s += 14;
+            else if (node.media_type === 'ona') s += 3;
+            else if (node.media_type === 'ova' || node.media_type === 'special' || node.media_type === 'movie') s -= 35;
+          }
+
+          // Length bias (still useful to separate TV core vs shorts)
           if (typeof node.num_episodes === 'number') {
             if (node.num_episodes >= 100) s += 30;
             else if (node.num_episodes >= 50) s += 15;
-            else if (node.num_episodes <= 20) s -= 15;
-            else if (node.num_episodes <= 5)  s -= 25;
+            else if (!movieWanted) { // avoid penalizing single-episode movies
+              if (node.num_episodes <= 20) s -= 15;
+              else if (node.num_episodes <= 5)  s -= 25;
+            }
           }
 
           // Franchise base with discriminators for both guess and candidate titles
@@ -1075,27 +1100,43 @@ function titlesOf(node){
             const candBases = titlesOf(node).map(baseFranchiseWithDiscriminators).filter(Boolean);
             const baseHit = candBases.some(b => b === gBase);
             if (baseHit) {
-              if (node.media_type === 'tv') s += 40;
-              if (typeof node.num_episodes === 'number' && node.num_episodes >= 100) s += 25;
-              if (node.media_type === 'movie' || node.media_type === 'special' || node.media_type === 'ova') s -= 40;
+              // Apply priors unless the user intended a movie
+              if (!movieWanted) {
+                if (node.media_type === 'tv') s += 40;
+                if (typeof node.num_episodes === 'number' && node.num_episodes >= 100) s += 25;
+                if (node.media_type === 'movie' || node.media_type === 'special' || node.media_type === 'ova') s -= 40;
 
-              // Soft priors: prefer TV and ensure min episodes if declared
-              const pr = priorFor(gBase);
-              if (pr) {
-                if (pr.prefer === 'tv') {
-                  if (node.media_type === 'tv') s += 20; else s -= 20;
-                }
-                if (typeof pr.minEpisodes === 'number' && typeof node.num_episodes === 'number') {
-                  if (node.num_episodes >= pr.minEpisodes) s += 20;
-                  else s -= 15;
+                const pr = priorFor(gBase);
+                if (pr) {
+                  if (pr.prefer === 'tv') {
+                    if (node.media_type === 'tv') s += 20; else s -= 20;
+                  }
+                  if (typeof pr.minEpisodes === 'number' && typeof node.num_episodes === 'number') {
+                    if (node.num_episodes >= pr.minEpisodes) s += 20; else s -= 15;
+                  }
                 }
               }
             }
           }
+
+          // If a specific MOVIE NUMBER is requested, sharply prefer that index
+          if (movieWanted) {
+            const wantIdx = wantedMovieIdx; // can be null if "movie" present without number
+            const candIdx = candidateMovieIndexFromTitles(node);
+            if (wantIdx != null && candIdx != null) {
+              if (candIdx === wantIdx) s += 42; // strong win for correct movie number
+              else if (Math.abs(candIdx - wantIdx) <= 1) s += 8; // close-ish (some sites off-by-one)
+              else s -= 30; // wrong movie number — push away
+            }
+          }
         }
-        // If the exact guess likely refers to a TV season (contains 'season'/'cour' or a number), penalize movie/ova/special harder
+        // If the exact guess likely refers to a TV season (contains 'season'...'cour' or a number), penalize movie/ova/special harder
         if (/\b(season|cour|part)\b|\b\d{1,2}\b/.test(gRaw.toLowerCase())) {
           if (node.media_type === 'movie' || node.media_type === 'special' || node.media_type === 'ova') s -= 20;
+        }
+        // If the guess clearly indicates a movie, penalize TV candidates slightly
+        if (/\b(movie|film)\b/i.test(gRaw) && node.media_type === 'tv') {
+          s -= 15;
         }
         best = Math.max(best, s);
       }
