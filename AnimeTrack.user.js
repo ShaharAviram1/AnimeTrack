@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.6.5
+// @version      1.6.6
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -952,24 +952,31 @@ function titlesOf(node){
       for (const t of all){
         const n = normalizeCmp(t);
         if (!n) continue;
-        // If any MAL alternative title / synonym matches strongly, boost hard
-        if (n === gNorm) return 140; // exact normalized alt-title match (decisive)
-        if (gNorm.includes(n) && n.length >= 8) {
-          // candidate alt-title fully inside our long guess (e.g., slug)
-          // longer contained alt-title -> stronger signal
-          return Math.max(120, n.length >= 14 ? 130 : 120);
-        }
-        if (n === gNorm) return 140; // exact normalized title wins decisively
 
-        // Fuzzy scoring only if there is real agreement: require ≥2 shared tokens and decent ratio
+        // --- Exact equality: decisive ---
+        if (n === gNorm) return 150; // exact normalized title/alt-title wins decisively
+
+        // --- Mutual containment (no single-word wins): require length and token count ---
+        const nTokArr = n.split(' ').filter(Boolean);
+        const gTokArr = Array.from(gTokens);
+        const nHasWords = nTokArr.length >= 2;
+        const gHasWords = gTokArr.length >= 2;
+        const longEnough = (n.length >= 10 || gNorm.length >= 10);
+
+        // Containment either way (e.g., MAL alt is short, slug is long; or vice versa)
+        if (longEnough && nHasWords && gHasWords && (gNorm.includes(n) || n.includes(gNorm))) {
+          // Strength by shorter string length to prefer more specific titles
+          const shorter = Math.min(n.length, gNorm.length);
+          return shorter >= 14 ? 138 : 130;
+        }
+
+        // --- Token overlap: require real agreement (≥2 shared tokens and ≥0.5 ratio) ---
         let s = -1;
-        const nTokens = new Set(n.split(' ').filter(Boolean));
+        const nTokens = new Set(nTokArr);
         let inter = 0; for (const tok of gTokens) if (nTokens.has(tok)) inter++;
         const overlap = inter / Math.max(1, Math.min(gTokens.size, nTokens.size));
-
         if (inter >= 2 && overlap >= 0.5) {
-          // scale by overlap; discourage weak partials
-          s = Math.floor(overlap * 100) - 5;
+          s = Math.floor(overlap * 100) - 5; // scale by overlap; discourage weak partials
         }
         // Generic media-type and length preferences (franchise-agnostic)
         if (s >= 0) {
