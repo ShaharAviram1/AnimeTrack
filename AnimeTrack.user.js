@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.6.3
+// @version      1.6.4
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -131,6 +131,11 @@
   function norm(s){ return (s||'').replace(/\s+/g,' ').trim(); }
   function encodeForm(obj){ return Object.keys(obj).map(k => `${encodeURIComponent(k)}=${encodeURIComponent(obj[k])}`).join('&'); }
   function titleCase(s){ return (s||'').split(' ').map(w => w ? (w[0].toUpperCase()+w.slice(1)) : w).join(' '); }
+
+  // Prefer exact title (only trim/collapse spaces) for first MAL search to avoid partial matches
+  function preferExactTitle(s){
+    return (s||'').replace(/\s+/g,' ').trim();
+  }
 
   function _decSlug(s){ try { return decodeURIComponent(s); } catch { return s || ''; } }
   // Extract a canonical series slug from a pathname
@@ -669,8 +674,14 @@ function titlesOf(node){
       const t = provider.detectTitle(document, location);
       if (t && t.trim().length > 1) {
         dlog('guessTitle: provider returned →', t);
-        return cleanTitle(t);
+        return preferExactTitle(t);
       }
+    }
+
+    // Try exact document.title first (no aggressive cleaning) to keep season/part tokens
+    if (document.title && document.title.trim().length > 1) {
+      const dt = preferExactTitle(document.title);
+      if (dt) { dlog('guessTitle: exact document.title →', dt); return dt; }
     }
 
     // fallback to existing logic
@@ -948,7 +959,7 @@ function titlesOf(node){
           // longer contained alt-title -> stronger signal
           return Math.max(120, n.length >= 14 ? 130 : 120);
         }
-        if (n === gNorm) return 100;                  // exact normalized
+        if (n === gNorm) return 140;                  // exact normalized title wins decisively
         let s = -1;
         if (n.startsWith(gNorm)) s = Math.max(s, 82);
         if (n.includes(gNorm))  s = Math.max(s, 66);
@@ -995,6 +1006,10 @@ function titlesOf(node){
               }
             }
           }
+        }
+        // If the exact guess likely refers to a TV season (contains 'season'/'cour' or a number), penalize movie/ova/special harder
+        if (/\b(season|cour|part)\b|\b\d{1,2}\b/.test(gRaw.toLowerCase())) {
+          if (node.media_type === 'movie' || node.media_type === 'special' || node.media_type === 'ova') s -= 20;
         }
         best = Math.max(best, s);
       }
@@ -1046,7 +1061,8 @@ function titlesOf(node){
     }
     if (!guess || guess.length < 2) return null;
     let picked = null, data = [];
-    const cands = seasonVariants(guess);
+    // Search order: exact title first, then relaxed variants
+    const cands = [preferExactTitle(guess), ...seasonVariants(guess)];
     dlog('ensureAutoMappingIfNeeded: cands=', cands);
     // Expand with high-signal phrases extracted from the long title
     (function(){
