@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.6.4
+// @version      1.6.5
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -959,15 +959,18 @@ function titlesOf(node){
           // longer contained alt-title -> stronger signal
           return Math.max(120, n.length >= 14 ? 130 : 120);
         }
-        if (n === gNorm) return 140;                  // exact normalized title wins decisively
+        if (n === gNorm) return 140; // exact normalized title wins decisively
+
+        // Fuzzy scoring only if there is real agreement: require ≥2 shared tokens and decent ratio
         let s = -1;
-        if (n.startsWith(gNorm)) s = Math.max(s, 82);
-        if (n.includes(gNorm))  s = Math.max(s, 66);
-        // token overlap bonus
         const nTokens = new Set(n.split(' ').filter(Boolean));
         let inter = 0; for (const tok of gTokens) if (nTokens.has(tok)) inter++;
         const overlap = inter / Math.max(1, Math.min(gTokens.size, nTokens.size));
-        s = Math.max(s, Math.floor(overlap * 80));
+
+        if (inter >= 2 && overlap >= 0.5) {
+          // scale by overlap; discourage weak partials
+          s = Math.floor(overlap * 100) - 5;
+        }
         // Generic media-type and length preferences (franchise-agnostic)
         if (s >= 0) {
           // Prefer TV series strongly, lightly prefer ONA, penalize movies/specials/OVA
@@ -1064,34 +1067,6 @@ function titlesOf(node){
     // Search order: exact title first, then relaxed variants
     const cands = [preferExactTitle(guess), ...seasonVariants(guess)];
     dlog('ensureAutoMappingIfNeeded: cands=', cands);
-    // Expand with high-signal phrases extracted from the long title
-    (function(){
-      const base = cleanTitle(guess).toLowerCase();
-      const tokens = base.split(/[^a-z0-9]+/).filter(x => x && x.length > 1);
-      const STOP = new Set([
-        'the','a','an','of','for','to','in','and','or','on','at','by','with',
-        'my','i','am','im','episode','ep','season','part','cour','level','lvl','lv'
-      ]);
-      const words = tokens.filter(w => !STOP.has(w));
-      const phrases = new Set();
-
-      // build bi-grams and tri-grams
-      for (let i=0; i<words.length; i++){
-        if (i+1 < words.length) phrases.add(words[i] + ' ' + words[i+1]);
-        if (i+2 < words.length) phrases.add(words[i] + ' ' + words[i+1] + ' ' + words[i+2]);
-      }
-
-      // pick a few high-signal phrases likely to appear in MAL alt titles
-      const extras = [];
-      phrases.forEach(p => {
-        if (/gacha/.test(p)) extras.push(p);
-        else if (/(dungeon|labyrinth)/.test(p)) extras.push(p);
-        else if (/(revenge|backstab)/.test(p)) extras.push(p);
-      });
-
-      // cap to a small set so we don't spam MAL (order preserved)
-      extras.slice(0, 4).forEach(p => cands.push(titleCase(p)));
-    })();
     for (const q of cands){
       const res = await malSearch(q);
       data = (res && res.data) || [];
@@ -1106,7 +1081,7 @@ function titlesOf(node){
       dlog('ensureAutoMappingIfNeeded: bestScore=', conf, 'gap=', gap);
 
       // Accept only if clearly ahead; otherwise try next variant
-      if (conf >= 120 && gap >= 30) break;
+      if (conf >= 125 && gap >= 35) break;
       // If nothing else left, keep this as fallback
     }
     if (picked) dlog('ensureAutoMappingIfNeeded: picked=', picked && {id:picked.id, title:picked.title});
