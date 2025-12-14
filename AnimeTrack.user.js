@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.6.9
+// @version      1.7.0
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -105,6 +105,20 @@
   ,expires:'animetrack.expires'
   , canon:  'animetrack.franchiseCanon'
   };
+  // --- Session cache & scrobble guards (A1) ---
+  const SESSION = {
+    statusCache: new Map(),       // malId -> {ts, data}
+    scrobbleInFlight: false,
+    lastMarkKey: ''               // `${malId}#${ep}`
+  };
+  function getCachedStatus(id, maxAgeMs=20000){
+    const e = SESSION.statusCache.get(id);
+    return (e && (Date.now()-e.ts)<=maxAgeMs) ? e.data : null;
+  }
+  function setCachedStatus(id, data){
+    if (data === null) { SESSION.statusCache.delete(id); return; } // bust
+    SESSION.statusCache.set(id, { ts: Date.now(), data });
+  }
   const SEEDED_HOSTS = new Set([
     '9anime.to','aniwatch.to','aniwatchtv.to','gogoanime.dk','gogoanime.fi','gogoanimehd.to','hianime.to','hianime.tv','zoro.to'
   ]);
@@ -894,6 +908,8 @@ function titlesOf(node){
     return res;
   }
   async function getMyListStatus(malAnimeId){
+    const cached = getCachedStatus(malAnimeId);
+    if (cached) return cached;
     const token = await ensureFreshToken();
     const base = `https://api.myanimelist.net/v2/anime/${encodeURIComponent(malAnimeId)}`;
 
@@ -917,6 +933,7 @@ function titlesOf(node){
       if (typeof resp.body.num_watched_episodes !== 'number' && typeof resp.body.num_episodes_watched === 'number') {
         resp.body.num_watched_episodes = resp.body.num_episodes_watched;
       }
+      setCachedStatus(malAnimeId, resp.body);
       return resp.body;
     }
 
@@ -927,6 +944,7 @@ function titlesOf(node){
         if (typeof resp.body.num_watched_episodes !== 'number' && typeof resp.body.num_episodes_watched === 'number') {
           resp.body.num_watched_episodes = resp.body.num_episodes_watched;
         }
+        setCachedStatus(malAnimeId, resp.body);
         return resp.body;
       }
     }
@@ -938,6 +956,7 @@ function titlesOf(node){
       if (typeof st.num_watched_episodes !== 'number' && typeof st.num_episodes_watched === 'number') {
         st.num_watched_episodes = st.num_episodes_watched;
       }
+      setCachedStatus(malAnimeId, st);
       return st;
     }
 
@@ -1282,6 +1301,8 @@ function titlesOf(node){
             await setTokens(res.access_token, res.refresh_token || '', res.expires_in);
             await gm.setValue(STORAGE.oauthErr, '');
             toast('Connected to MAL');
+            setCachedStatus(null, null); // harmless no-op/bust
+            try { window.dispatchEvent(new CustomEvent('at:status-changed', { detail:{ malId: 'any' } })); } catch(_){}
             console.debug('[AnimeTrack] OAuth success');
             await renderPanel();
             try {
@@ -1539,6 +1560,7 @@ function titlesOf(node){
 
         if (me && (me.name || me.id)) {
           if (statusOut) statusOut.textContent = `Connected ✓ — ${me.name || ('ID ' + me.id)}`;
+          try { window.dispatchEvent(new CustomEvent('at:status-changed', { detail:{ malId:'@me' } })); } catch(_){}
           await gm.setValue(STORAGE.oauthErr, '');
         } else if (me && (me.error || me.message || me.error_description)) {
           const m = me.error_description || me.message || me.error || 'Unknown response';
@@ -1699,6 +1721,8 @@ function titlesOf(node){
         }
         try {
           await updateMyListEpisodes(m.id, ep);
+          setCachedStatus(m.id, null); // bust cache
+          try { window.dispatchEvent(new CustomEvent('at:status-changed', { detail:{ malId:m.id } })); } catch(_){}
           // Refresh watched count immediately
           try {
             const st2 = await getMyListStatus(m.id);
@@ -1715,7 +1739,7 @@ function titlesOf(node){
       if (setWatchBtn) setWatchBtn.onclick = async () => {
         const m = await getMap(seriesKey) || await ensureAutoMappingIfNeeded();
         if (!m || !m.id) return toast('Map this series first.');
-        try { await setMyStatusWatching(m.id); toast('Status set to Watching'); await renderPanel(); }
+        try { await setMyStatusWatching(m.id); toast('Status set to Watching'); setCachedStatus(m.id, null); try { window.dispatchEvent(new CustomEvent('at:status-changed', { detail:{ malId:m.id } })); } catch(_){ } await renderPanel(); }
         catch(e){ toast('Failed to set status: ' + (e && e.message || e)); }
       };
     } else {
@@ -1727,9 +1751,78 @@ function titlesOf(node){
         toast('Site added: ' + val);
       };
     }
+
+    // Auto-refresh the open panel when status changes elsewhere
+    if (!window.__AT_listeners){
+      window.__AT_listeners = true;
+      window.addEventListener('at:status-changed', () => { if (panelOpen) renderPanel(); });
+    }
   }
 
   // ---- Scrobble loop ----
+  // ---- Scrobble (A1): throttled timeupdate + single-latch mark ----
+  function setupScrobble(){
+    if (setupScrobble._on) return;
+    setupScrobble._on = true;
+
+    let lastCheck = 0;
+    async function onTimeUpdate(ev){
+      const now = Date.now();
+      if (now - lastCheck < 1800) return;  // ~1.8s throttle
+      lastCheck = now;
+
+      const v = ev.target;
+      if (!v || !v.duration) return;
+      const pct = v.currentTime / v.duration;
+      if (pct < 0.8) return;
+
+      maybeScrobbleOnce().catch(()=>{});
+    }
+
+    const attach = ()=>{
+      const vid = document.querySelector('video');
+      if (vid && !vid.__at_scrobble){
+        vid.addEventListener('timeupdate', onTimeUpdate);
+        vid.__at_scrobble = true;
+      }
+    };
+
+    attach();
+    const mo = new MutationObserver(()=>attach());
+    mo.observe(document.documentElement, { childList:true, subtree:true });
+  }
+
+  async function maybeScrobbleOnce(){
+    if (SESSION.scrobbleInFlight) return;
+    const key = getSeriesKey();
+    let m = await getMap(key) || await ensureAutoMappingIfNeeded();
+    const ep = guessEpisode() || 1;
+    if (!m || !m.id) return;
+    const markKey = `${m.id}#${ep}`;
+    if (SESSION.lastMarkKey === markKey) return;
+
+    try {
+      SESSION.scrobbleInFlight = true;
+      const st = await getMyListStatus(m.id);
+      const stName = (st && st.status) ? String(st.status).toLowerCase() : '';
+      const watched = (st && typeof st.num_watched_episodes === 'number') ? st.num_watched_episodes : 0;
+
+      if (!stName || stName !== 'watching') {
+        if (!maybeScrobbleOnce._nagged){ toast('Set status to \"Watching\" to enable auto-mark.'); maybeScrobbleOnce._nagged = true; }
+        return;
+      }
+      if (ep <= watched) return;
+
+      await updateMyListEpisodes(m.id, ep);
+      setCachedStatus(m.id, null); // bust cache
+      SESSION.lastMarkKey = markKey;
+      toast(`Marked ep ${ep} watched on MAL`);
+      try { window.dispatchEvent(new CustomEvent('at:status-changed', { detail:{ malId:m.id } })); } catch(_){}
+    } finally {
+      SESSION.scrobbleInFlight = false;
+    }
+  }
+
   async function scrobbleLoop(){
     try {
       const host = location.hostname;
@@ -1795,7 +1888,7 @@ function titlesOf(node){
       ensureShell();
       updateBubble();
       if (location.hostname==='myanimelist.net') { panel.style.display='block'; renderPanel(); }
-      requestAnimationFrame(scrobbleLoop);
+      setupScrobble();
     };
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run, { once:true }); else run();
   }
