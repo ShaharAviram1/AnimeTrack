@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.7.0
+// @version      1.7.1
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -22,7 +22,6 @@
 // @connect      api.myanimelist.net
 // @connect      shaharaviram.workers.dev
 // @connect      anime-track-oauth.shaharaviram.workers.dev
-// @noframes
 // @match        *://myanimelist.net/*
 // @match        *://hianime.to/*
 // @match        *://hianime.tv/*
@@ -972,6 +971,52 @@ function titlesOf(node){
     return res;
   }
 
+  async function getAnimeDetails(malAnimeId){
+    const token = await ensureFreshToken();
+    const url = `https://api.myanimelist.net/v2/anime/${encodeURIComponent(malAnimeId)}?fields=num_episodes,media_type,title`;
+    const resp = await new Promise((resolve) => {
+      gm.xmlHttpRequest({
+        method: 'GET',
+        url,
+        headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' },
+        onload: (r) => {
+          let body = null;
+          try { body = r.responseText ? JSON.parse(r.responseText) : null; } catch {}
+          resolve({ status: r.status, body });
+        },
+        onerror: () => resolve({ status: 0, body: null })
+      });
+    });
+    return resp.body || null;
+  }
+
+  async function setMyStatusCompletedIfFinished(malAnimeId, watchedEp){
+    try {
+      const info = await getAnimeDetails(malAnimeId);
+      const total = info && typeof info.num_episodes === 'number' ? info.num_episodes : 0;
+      if (total > 0 && watchedEp >= total) {
+        const token = await ensureFreshToken();
+        const url = `https://api.myanimelist.net/v2/anime/${encodeURIComponent(malAnimeId)}/my_list_status`;
+        const body = encodeForm({ status: 'completed' });
+        await xhr('PATCH', url, { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/x-www-form-urlencoded' }, body);
+        setCachedStatus(malAnimeId, null);
+        toast('Series completed ✅');
+        try { window.dispatchEvent(new CustomEvent('at:status-changed', { detail:{ malId: malAnimeId } })); } catch(_){ }
+      }
+    } catch (e) {
+      dlog('setMyStatusCompletedIfFinished: skipped', e && e.message);
+    }
+  }
+
+  async function startRewatch(malAnimeId){
+    const token = await ensureFreshToken();
+    const url = `https://api.myanimelist.net/v2/anime/${encodeURIComponent(malAnimeId)}/my_list_status`;
+    const body = encodeForm({ status: 'watching', is_rewatching: 'true', num_watched_episodes: 0 });
+    const res = await xhr('PATCH', url, { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/x-www-form-urlencoded' }, body);
+    setCachedStatus(malAnimeId, null);
+    return res;
+  }
+
   // ---- Site list & mapping ----
   async function seedSitesOnce(){
     try{
@@ -1367,7 +1412,7 @@ function titlesOf(node){
     const epGuess = (onMAL || onHome) ? null : guessEpisode();
 
     // Fetch status BEFORE computing alreadyWatched to avoid TDZ/undefined issues
-    let myStatus = null; let watchedCount = null; let needsWatching = false;
+    let myStatus = null; let watchedCount = null; let needsWatching = false; let needsRewatch = false;
     if (authed && mapped && mapped.id) {
       try {
         myStatus = await getMyListStatus(mapped.id);
@@ -1375,8 +1420,12 @@ function titlesOf(node){
           if (typeof myStatus.num_watched_episodes === 'number') watchedCount = myStatus.num_watched_episodes;
           else if (typeof myStatus.num_episodes_watched === 'number') watchedCount = myStatus.num_episodes_watched;
         }
-        const st = (myStatus && myStatus.status) || '';
-        if (!st || (st.toLowerCase && st.toLowerCase() !== 'watching')) needsWatching = true;
+        const st = (myStatus && myStatus.status) ? String(myStatus.status).toLowerCase() : '';
+        if (st === 'completed') {
+          needsRewatch = true;
+        } else if (!st || st !== 'watching') {
+          needsWatching = true;
+        }
       } catch(_) {}
     }
 
@@ -1420,7 +1469,7 @@ function titlesOf(node){
         <span class="sub">Status:</span>
         <span class="sub" id="at-statline">${statusText}</span>
         <div style="flex:1"></div>
-        ${needsWatching ? '<button id="at-setwatch" class="primary">Set to Watching</button>' : ''}
+        ${needsRewatch ? '<button id="at-setwatch" class="primary">Start rewatch</button>' : (needsWatching ? '<button id="at-setwatch" class="primary">Set to Watching</button>' : '')}
       </div>
       <div class="row">
         <span class="sub">Watched:</span>
@@ -1721,6 +1770,7 @@ function titlesOf(node){
         }
         try {
           await updateMyListEpisodes(m.id, ep);
+          await setMyStatusCompletedIfFinished(m.id, ep);
           setCachedStatus(m.id, null); // bust cache
           try { window.dispatchEvent(new CustomEvent('at:status-changed', { detail:{ malId:m.id } })); } catch(_){}
           // Refresh watched count immediately
@@ -1739,8 +1789,22 @@ function titlesOf(node){
       if (setWatchBtn) setWatchBtn.onclick = async () => {
         const m = await getMap(seriesKey) || await ensureAutoMappingIfNeeded();
         if (!m || !m.id) return toast('Map this series first.');
-        try { await setMyStatusWatching(m.id); toast('Status set to Watching'); setCachedStatus(m.id, null); try { window.dispatchEvent(new CustomEvent('at:status-changed', { detail:{ malId:m.id } })); } catch(_){ } await renderPanel(); }
-        catch(e){ toast('Failed to set status: ' + (e && e.message || e)); }
+        try {
+          const st = await getMyListStatus(m.id);
+          const stName = (st && st.status) ? String(st.status).toLowerCase() : '';
+          if (stName === 'completed') {
+            await startRewatch(m.id);
+            toast('Rewatch started');
+          } else {
+            await setMyStatusWatching(m.id);
+            toast('Status set to Watching');
+          }
+          setCachedStatus(m.id, null);
+          try { window.dispatchEvent(new CustomEvent('at:status-changed', { detail:{ malId:m.id } })); } catch(_){ }
+          await renderPanel();
+        } catch(e) {
+          toast('Failed: ' + (e && e.message || e));
+        }
       };
     } else {
       const addBtn = card.querySelector('#at-addbtn');
@@ -1772,18 +1836,25 @@ function titlesOf(node){
       lastCheck = now;
 
       const v = ev.target;
-      if (!v || !v.duration) return;
+      if (!v || !v.duration || !isFinite(v.duration) || v.duration <= 0) return;
       const pct = v.currentTime / v.duration;
       if (pct < 0.8) return;
 
-      maybeScrobbleOnce().catch(()=>{});
+      dlog('80% reached', { pct: Math.round(pct*1000)/10, t: Math.round(v.currentTime), d: Math.round(v.duration), href: location.href, frame: (window.top !== window.self) });
+      maybeScrobbleOnce().catch((e)=>dlog('maybeScrobbleOnce error', e && e.message));
     }
 
     const attach = ()=>{
-      const vid = document.querySelector('video');
-      if (vid && !vid.__at_scrobble){
-        vid.addEventListener('timeupdate', onTimeUpdate);
-        vid.__at_scrobble = true;
+      const vids = Array.from(document.querySelectorAll('video'));
+      if (!vids.length) return;
+      for (const vid of vids){
+        if (vid && !vid.__at_scrobble){
+          vid.addEventListener('timeupdate', onTimeUpdate, { passive: true });
+          vid.addEventListener('loadedmetadata', onTimeUpdate, { passive: true });
+          vid.addEventListener('playing', onTimeUpdate, { passive: true });
+          vid.__at_scrobble = true;
+          dlog('setupScrobble: attached to video', { dur: vid.duration, src: (vid.currentSrc || vid.src || '').slice(0,120) });
+        }
       }
     };
 
@@ -1798,6 +1869,7 @@ function titlesOf(node){
     let m = await getMap(key) || await ensureAutoMappingIfNeeded();
     const ep = guessEpisode() || 1;
     if (!m || !m.id) return;
+    if ((key || '').includes('|unresolved')) { dlog('maybeScrobbleOnce: unresolved key, skipping'); return; }
     const markKey = `${m.id}#${ep}`;
     if (SESSION.lastMarkKey === markKey) return;
 
@@ -1814,6 +1886,7 @@ function titlesOf(node){
       if (ep <= watched) return;
 
       await updateMyListEpisodes(m.id, ep);
+      await setMyStatusCompletedIfFinished(m.id, ep);
       setCachedStatus(m.id, null); // bust cache
       SESSION.lastMarkKey = markKey;
       toast(`Marked ep ${ep} watched on MAL`);

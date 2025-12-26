@@ -26,9 +26,15 @@ export default {
         cf: { cacheTtl: 0, cacheEverything: false },
         headers: { 'Cache-Control': 'no-cache' }
       });
-      const upLen = r.headers.get('content-length');
-      const bodyTxt = req.method === 'HEAD' ? '' : await r.text();
-      const len = req.method === 'HEAD' ? (upLen || '0') : String(new TextEncoder().encode(bodyTxt).length);
+      const metaTxtFull = await r.text();
+      const metaLen = String(new TextEncoder().encode(metaTxtFull).length);
+      const bodyTxt = (req.method === 'HEAD') ? '' : metaTxtFull;
+      const len = (req.method === 'HEAD') ? metaLen : metaLen;
+      const now = new Date().toUTCString();
+      const mVer = metaTxtFull.match(/@version\s+([^\s]+)/);
+      const hashBuf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(metaTxtFull || ''));
+      const hashArr = Array.from(new Uint8Array(hashBuf));
+      const etag = 'W/"' + hashArr.map(b => b.toString(16).padStart(2,'0')).join('') + '"';
       return new Response(bodyTxt, {
         status: 200,
         headers: {
@@ -40,7 +46,11 @@ export default {
           'X-Content-Type-Options': 'nosniff',
           'Cross-Origin-Resource-Policy': 'cross-origin',
           'Vary': '*',
-          'Content-Length': len
+          'Content-Length': len,
+          'Last-Modified': now,
+          'ETag': etag,
+          'Accept-Ranges': 'bytes',
+          'X-Revision': (mVer && mVer[1]) ? mVer[1] : 'unknown'
         }
       });
     }
@@ -55,9 +65,15 @@ export default {
         cf: { cacheTtl: 0, cacheEverything: false },
         headers: { 'Cache-Control': 'no-cache' }
       });
-      const upLen = r.headers.get('content-length');
-      const bodyTxt = req.method === 'HEAD' ? '' : await r.text();
-      const len = req.method === 'HEAD' ? (upLen || '0') : String(new TextEncoder().encode(bodyTxt).length);
+      const metaTxtFull = await r.text();
+      const metaLen = String(new TextEncoder().encode(metaTxtFull).length);
+      const bodyTxt = (req.method === 'HEAD') ? '' : metaTxtFull;
+      const len = metaLen;
+      const now = new Date().toUTCString();
+      const mVer = metaTxtFull.match(/@version\s+([^\s]+)/);
+      const hashBuf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(metaTxtFull || ''));
+      const hashArr = Array.from(new Uint8Array(hashBuf));
+      const etag = 'W/"' + hashArr.map(b => b.toString(16).padStart(2,'0')).join('') + '"';
       return new Response(bodyTxt, {
         status: 200,
         headers: {
@@ -70,7 +86,11 @@ export default {
           'X-Content-Type-Options': 'nosniff',
           'Cross-Origin-Resource-Policy': 'cross-origin',
           'Vary': '*',
-          'Content-Length': len
+          'Content-Length': len,
+          'Last-Modified': now,
+          'ETag': etag,
+          'Accept-Ranges': 'bytes',
+          'X-Revision': (mVer && mVer[1]) ? mVer[1] : 'unknown'
         }
       });
     }
@@ -128,7 +148,10 @@ export default {
             'Expires': '0',
             'X-Content-Type-Options': 'nosniff',
             'Content-Length': len,
-            'Content-Disposition': 'inline; filename="AnimeTrack.user.js"'
+            'Content-Disposition': 'inline; filename="AnimeTrack.user.js"',
+            'Last-Modified': new Date().toUTCString(),
+            'Accept-Ranges': 'bytes',
+            'X-Revision': version || 'unknown'
           }
         });
       } else {
@@ -144,7 +167,11 @@ export default {
             'Expires': '0',
             'X-Content-Type-Options': 'nosniff',
             'Content-Length': len,
-            'Content-Disposition': 'inline; filename="AnimeTrack.user.js"'
+            'Content-Disposition': 'inline; filename="AnimeTrack.user.js"',
+            'Last-Modified': new Date().toUTCString(),
+            'Accept-Ranges': 'bytes',
+            'X-Revision': version || 'unknown',
+            'ETag': (await (async()=>{ const hb = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(txt||'')); const ha = Array.from(new Uint8Array(hb)); return 'W/"'+ha.map(b=>b.toString(16).padStart(2,'0')).join('')+'"'; })())
           }
         });
       }
@@ -201,7 +228,10 @@ export default {
             'Expires': '0',
             'X-Content-Type-Options': 'nosniff',
             'Content-Length': len,
-            'Content-Disposition': 'inline; filename="AnimeTrack.user.js"'
+            'Content-Disposition': 'inline; filename="AnimeTrack.user.js"',
+            'Last-Modified': new Date().toUTCString(),
+            'Accept-Ranges': 'bytes',
+            'X-Revision': version || 'unknown'
           }
         });
       } else {
@@ -217,7 +247,11 @@ export default {
             'Expires': '0',
             'X-Content-Type-Options': 'nosniff',
             'Content-Length': len,
-            'Content-Disposition': 'inline; filename="AnimeTrack.user.js"'
+            'Content-Disposition': 'inline; filename="AnimeTrack.user.js"',
+            'Last-Modified': new Date().toUTCString(),
+            'Accept-Ranges': 'bytes',
+            'X-Revision': version || 'unknown',
+            'ETag': (await (async()=>{ const hb = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(txt||'')); const ha = Array.from(new Uint8Array(hb)); return 'W/"'+ha.map(b=>b.toString(16).padStart(2,'0')).join('')+'"'; })())
           }
         });
       }
