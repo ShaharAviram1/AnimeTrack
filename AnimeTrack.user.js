@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.7.2
+// @version      1.7.3
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -108,6 +108,42 @@
     }
   } catch {}
 
+  try {
+    if (gm && typeof gm.registerMenuCommand === 'function') {
+      gm.registerMenuCommand('AnimeTrack: Dump Player Snapshot', async () => {
+        try {
+          const vids = Array.from(document.querySelectorAll('video'));
+          const frames = Array.from(document.querySelectorAll('iframe')).map(f => ({
+            src: f.src || '',
+            id: f.id || '',
+            cls: f.className || ''
+          }));
+
+          const snap = {
+            url: location.href,
+            host: location.host,
+            ts: new Date().toISOString(),
+            videos: vids.map(v => ({
+              currentTime: v.currentTime,
+              duration: v.duration,
+              ended: v.ended,
+              paused: v.paused,
+              readyState: v.readyState,
+              src: v.currentSrc || v.src || '',
+              hasSrc: !!(v.currentSrc || v.src),
+            })),
+            iframeCount: frames.length,
+            iframes: frames.slice(0, 8)
+          };
+
+          await copyToClipboard(JSON.stringify(snap, null, 2));
+        } catch (e) {
+          toast('Snapshot failed: ' + (e && e.message || e));
+        }
+      });
+    }
+  } catch {}
+
   // ---- Constants ----
   let MAL_CLIENT_ID = '8cdc30a4b5c47b9aebe8372b6c5883ee';
   let MAL_REDIRECT_URI = 'https://shaharaviram1.github.io/AnimeTrack/oauth.html';
@@ -163,6 +199,21 @@
   }
 
   // ---- Utils ----
+  function safeNow(){ return Date.now(); }
+
+  async function copyToClipboard(text){
+    try {
+      await navigator.clipboard.writeText(String(text));
+      toast('Copied snapshot to clipboard ✅');
+      return true;
+    } catch (e) {
+      // fallback: prompt
+      try { prompt('Copy this:', String(text)); } catch {}
+      toast('Snapshot ready (manual copy)');
+      return false;
+    }
+  }
+
   const qsa = (s, r=document) => Array.from(r.querySelectorAll(s));
   const qs = (s, r=document) => r.querySelector(s);
   const isFrame = (window.top !== window.self);
@@ -1335,6 +1386,189 @@ function titlesOf(node){
       (enabled ? 'AnimeTrack — click to open/close' : 'AnimeTrack — click to open, enable site via panel');
   }
 
+  // ---- 80% Auto-mark tracker (HiAnime-safe, SPA-safe) ----
+  const AUTO = {
+    attachedVideo: null,
+    attachedSrc: '',
+    lastProgressTs: 0,
+    lastRatio: 0,
+    firedForKey: '',     // `${seriesKey}#${ep}`
+    obs: null,
+    tickTimer: null
+  };
+
+  function isFiniteDuration(d){
+    return typeof d === 'number' && isFinite(d) && d > 1;
+  }
+
+  function currentEpisodeKey(seriesKey, ep){
+    if (!seriesKey || !ep) return '';
+    return `${seriesKey}#${ep}`;
+  }
+
+  async function tryAutoMarkWatched(reason){
+    // uses guards you already have: SESSION.scrobbleInFlight + SESSION.lastMarkKey
+    try {
+      if (SESSION.scrobbleInFlight) return;
+      const onMAL = isMAL();
+      if (onMAL) return;
+      if (isHomePage()) return;
+
+      const seriesKey = getSeriesKey();
+      const mapped = await getMap(seriesKey) || await ensureAutoMappingIfNeeded();
+      if (!mapped || !mapped.id) return;
+
+      const ep = guessEpisode();
+      if (!ep || ep <= 0) return;
+
+      const key = currentEpisodeKey(seriesKey, ep);
+      if (!key) return;
+
+      // avoid duplicates
+      if (SESSION.lastMarkKey === key || AUTO.firedForKey === key) return;
+
+      // check already watched
+      const st = await getMyListStatus(mapped.id);
+      const watched = st && typeof st.num_watched_episodes === 'number' ? st.num_watched_episodes : null;
+      const status = st && st.status ? String(st.status).toLowerCase() : '';
+
+      if (watched != null && ep <= watched) {
+        AUTO.firedForKey = key;
+        SESSION.lastMarkKey = key;
+        return;
+      }
+
+      // require "watching" unless empty/not set (your UX wants to prompt)
+      if (status && status !== 'watching') {
+        toast('Set status to Watching to enable auto-mark.');
+        return;
+      }
+
+      SESSION.scrobbleInFlight = true;
+      SESSION.lastMarkKey = key;
+      AUTO.firedForKey = key;
+
+      await updateMyListEpisodes(mapped.id, ep);
+      await setMyStatusCompletedIfFinished(mapped.id, ep);
+      setCachedStatus(mapped.id, null);
+
+      toast(`Auto-marked episode ${ep} watched ✅ (${reason})`);
+      try { window.dispatchEvent(new CustomEvent('at:status-changed', { detail:{ malId:mapped.id } })); } catch(_){}
+      try { if (panelOpen) renderPanel(); } catch(_){}
+    } catch (e) {
+      // clear lastMarkKey so a retry is possible if it failed
+      SESSION.lastMarkKey = '';
+      AUTO.firedForKey = '';
+      toast('Auto-mark failed: ' + (e && e.message || e));
+    } finally {
+      SESSION.scrobbleInFlight = false;
+    }
+  }
+
+  function detachVideo(){
+    const v = AUTO.attachedVideo;
+    if (!v) return;
+    try {
+      v.removeEventListener('timeupdate', onVideoProgress);
+      v.removeEventListener('ended', onVideoEnded);
+      v.removeEventListener('durationchange', onVideoProgress);
+      v.removeEventListener('loadedmetadata', onVideoProgress);
+    } catch {}
+    AUTO.attachedVideo = null;
+    AUTO.attachedSrc = '';
+    AUTO.lastRatio = 0;
+  }
+
+  function attachToVideo(v){
+    if (!v) return false;
+    const src = v.currentSrc || v.src || '';
+    // if the element or src changed, reattach
+    if (AUTO.attachedVideo === v && AUTO.attachedSrc === src) return true;
+
+    detachVideo();
+    AUTO.attachedVideo = v;
+    AUTO.attachedSrc = src;
+
+    try {
+      v.addEventListener('timeupdate', onVideoProgress, { passive:true });
+      v.addEventListener('durationchange', onVideoProgress, { passive:true });
+      v.addEventListener('loadedmetadata', onVideoProgress, { passive:true });
+      v.addEventListener('ended', onVideoEnded, { passive:true });
+    } catch {}
+
+    // also poll lightly (some players don’t fire timeupdate consistently)
+    if (!AUTO.tickTimer) {
+      AUTO.tickTimer = setInterval(() => {
+        if (AUTO.attachedVideo) onVideoProgress();
+      }, 2500);
+    }
+
+    return true;
+  }
+
+  function pickBestVideo(){
+    const vids = Array.from(document.querySelectorAll('video'));
+    if (!vids.length) return null;
+    // pick playing / most advanced / with src
+    vids.sort((a,b) => {
+      const as = (a.currentSrc||a.src||'') ? 1 : 0;
+      const bs = (b.currentSrc||b.src||'') ? 1 : 0;
+      if (bs !== as) return bs - as;
+      return (b.currentTime||0) - (a.currentTime||0);
+    });
+    return vids[0] || null;
+  }
+
+  function onVideoEnded(){
+    // if ended, mark regardless of duration weirdness
+    tryAutoMarkWatched('ended');
+  }
+
+  function onVideoProgress(){
+    const v = AUTO.attachedVideo;
+    if (!v) return;
+
+    // throttle
+    const now = safeNow();
+    if (now - AUTO.lastProgressTs < 900) return;
+    AUTO.lastProgressTs = now;
+
+    const d = v.duration;
+    const t = v.currentTime;
+
+    // If duration is unusable, rely on ended()
+    if (!isFiniteDuration(d) || !(t >= 0)) return;
+
+    const ratio = t / d;
+    AUTO.lastRatio = ratio;
+
+    if (ratio >= 0.80) {
+      tryAutoMarkWatched('80%');
+    }
+  }
+
+  function startAutoTracker(){
+    // reattach whenever DOM changes (SPA)
+    if (AUTO.obs) return;
+
+    const kick = () => {
+      const v = pickBestVideo();
+      if (v) attachToVideo(v);
+    };
+
+    try {
+      AUTO.obs = new MutationObserver(() => {
+        kick();
+      });
+      AUTO.obs.observe(document.documentElement, { childList:true, subtree:true });
+    } catch {}
+
+    // initial + delayed kicks
+    kick();
+    setTimeout(kick, 1200);
+    setTimeout(kick, 4000);
+  }
+
   // ---- Auto OAuth (message from oauth.html) ----
   window.addEventListener('message', async (ev) => {
     try {
@@ -2038,6 +2272,7 @@ function titlesOf(node){
   function boot(){
     const run = () => {
       ensureShell();
+      try { startAutoTracker(); } catch {}
       updateBubble();
       if (location.hostname==='myanimelist.net') { panel.style.display='block'; renderPanel(); }
       setupScrobble();
