@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.7.4
+// @version      1.7.5
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -32,6 +32,10 @@
 // @match        *://gogoanime.fi/*
 // @match        *://gogoanime.dk/*
 // @match        *://gogoanimehd.to/*
+// @match        *://megacloud.tv/*
+// @match        *://rapid-cloud.co/*
+// @match        *://vidcloud.to/*
+// @match        *://filemoon.sx/*
 // ==/UserScript==
 
 (() => {
@@ -1521,7 +1525,15 @@ function titlesOf(node){
   function pickBestVideo(){
     const vids = Array.from(document.querySelectorAll('video'));
     dlog('autoTracker: videos found =', vids.length);
-    if (!vids.length) return null;
+    if (!vids.length) {
+      try {
+        const ifs = Array.from(document.querySelectorAll('iframe'))
+          .map(f => (f.src||'').slice(0, 220))
+          .filter(Boolean);
+        if (ifs.length) dlog('autoTracker: iframe src sample =', ifs.slice(0, 4));
+      } catch {}
+      return null;
+    }
     // pick playing / most advanced / with src
     vids.sort((a,b) => {
       const as = (a.currentSrc||a.src||'') ? 1 : 0;
@@ -1593,6 +1605,138 @@ function titlesOf(node){
     kick();
     setTimeout(kick, 1200);
     setTimeout(kick, 4000);
+  }
+
+  // ---- Frame player tracker (for sites that embed the <video> in a cross-origin iframe) ----
+  // Runs inside the iframe (if our userscript matches that domain) and reports progress to the top window.
+  const FRAME = {
+    attached: null,
+    lastTs: 0,
+    lastRatio: 0,
+    tick: null
+  };
+
+  function framePost(type, payload){
+    try {
+      window.top.postMessage({
+        source: 'animetrack-player',
+        type,
+        payload: payload || null
+      }, '*');
+    } catch {}
+  }
+
+  function frameOnProgress(){
+    const v = FRAME.attached;
+    if (!v) return;
+    const now = safeNow();
+    if (now - FRAME.lastTs < 900) return;
+    FRAME.lastTs = now;
+
+    const d = v.duration;
+    const t = v.currentTime;
+    if (!isFiniteDuration(d) || !(t >= 0)) return;
+
+    const ratio = t / d;
+    FRAME.lastRatio = ratio;
+
+    // log only near the threshold to keep logs small
+    if (ratio >= 0.75) {
+      framePost('progress', { ratio, t, d, src: (v.currentSrc || v.src || '').slice(0, 140) });
+    }
+
+    if (ratio >= 0.80) {
+      framePost('hit80', { ratio, t, d });
+    }
+  }
+
+  function frameAttachToVideo(v){
+    if (!v) return false;
+    if (FRAME.attached === v) return true;
+    try {
+      if (FRAME.attached) {
+        FRAME.attached.removeEventListener('timeupdate', frameOnProgress);
+        FRAME.attached.removeEventListener('durationchange', frameOnProgress);
+        FRAME.attached.removeEventListener('loadedmetadata', frameOnProgress);
+        FRAME.attached.removeEventListener('ended', frameOnEnded);
+      }
+    } catch {}
+
+    FRAME.attached = v;
+    framePost('attached', {
+      src: (v.currentSrc || v.src || '').slice(0, 160),
+      duration: v.duration,
+      readyState: v.readyState
+    });
+
+    try {
+      v.addEventListener('timeupdate', frameOnProgress, { passive:true });
+      v.addEventListener('durationchange', frameOnProgress, { passive:true });
+      v.addEventListener('loadedmetadata', frameOnProgress, { passive:true });
+      v.addEventListener('ended', frameOnEnded, { passive:true });
+    } catch {}
+
+    if (!FRAME.tick) {
+      FRAME.tick = setInterval(frameOnProgress, 2500);
+    }
+    return true;
+  }
+
+  function frameOnEnded(){
+    framePost('ended', { ratio: 1 });
+  }
+
+  function startFrameTracker(){
+    // Only relevant inside iframes
+    if (!isFrame) return;
+
+    const kick = () => {
+      const vids = Array.from(document.querySelectorAll('video'));
+      if (vids.length) {
+        // Prefer the playing/most advanced one
+        vids.sort((a,b)=> (b.currentTime||0) - (a.currentTime||0));
+        frameAttachToVideo(vids[0]);
+      }
+    };
+
+    try {
+      const mo = new MutationObserver(()=>kick());
+      mo.observe(document.documentElement, { childList:true, subtree:true });
+    } catch {}
+
+    kick();
+    setTimeout(kick, 1200);
+    setTimeout(kick, 4000);
+  }
+
+  // Parent receives progress from iframe player and triggers the existing auto-mark logic.
+  // NOTE: we intentionally keep this very small; the parent still does all MAL work.
+  if (!isFrame) {
+    try {
+      window.addEventListener('message', (ev)=>{
+        const d = ev && ev.data;
+        if (!d || d.source !== 'animetrack-player') return;
+        if (d.type === 'hit80' || d.type === 'ended') {
+          // Use the parent page context for series/episode; iframe can be cross-origin.
+          tryAutoMarkWatched(d.type === 'ended' ? 'ended' : '80%');
+        }
+        // Keep a breadcrumb for debugging via Copy logs
+        try {
+          if (d.type === 'attached') {
+            dlog('autoTracker: iframe player attached', d.payload);
+          } else if (d.type === 'progress') {
+            dlog('autoTracker: iframe progress', {
+              ratio: Math.round((d.payload?.ratio||0)*1000)/1000,
+              t: d.payload?.t,
+              d: d.payload?.d
+            });
+          }
+        } catch {}
+      });
+    } catch {}
+  } else {
+    // iframe context
+    try { startFrameTracker(); } catch {}
   }
 
   // ---- Auto OAuth (message from oauth.html) ----
