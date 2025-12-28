@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.7.3
+// @version      1.7.4
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -321,6 +321,9 @@
     shadow.appendChild(panel);
 
     try { console.log('[AnimeTrack] UI shell ready'); } catch {}
+
+    // Start 80% tracker once UI exists (safe for SPA); no-op if already started
+    try { startAutoTracker(); dlog('autoTracker: started'); } catch(e){ dlog('autoTracker: start failed', e && e.message || e); }
 
     try {
       let t = null;
@@ -1489,6 +1492,15 @@ function titlesOf(node){
     AUTO.attachedVideo = v;
     AUTO.attachedSrc = src;
 
+    dlog('autoTracker: attached video', {
+      hasSrc: !!src,
+      src: src ? src.slice(0, 140) : '',
+      currentTime: v.currentTime,
+      duration: v.duration,
+      paused: v.paused,
+      readyState: v.readyState
+    });
+
     try {
       v.addEventListener('timeupdate', onVideoProgress, { passive:true });
       v.addEventListener('durationchange', onVideoProgress, { passive:true });
@@ -1508,6 +1520,7 @@ function titlesOf(node){
 
   function pickBestVideo(){
     const vids = Array.from(document.querySelectorAll('video'));
+    dlog('autoTracker: videos found =', vids.length);
     if (!vids.length) return null;
     // pick playing / most advanced / with src
     vids.sort((a,b) => {
@@ -1516,7 +1529,9 @@ function titlesOf(node){
       if (bs !== as) return bs - as;
       return (b.currentTime||0) - (a.currentTime||0);
     });
-    return vids[0] || null;
+    const v = vids[0] || null;
+    if (v) dlog('autoTracker: picked video', { hasSrc: !!(v.currentSrc||v.src), currentTime: v.currentTime, duration: v.duration, paused: v.paused, readyState: v.readyState });
+    return v;
   }
 
   function onVideoEnded(){
@@ -1542,6 +1557,11 @@ function titlesOf(node){
     const ratio = t / d;
     AUTO.lastRatio = ratio;
 
+    // Log occasionally so we can debug without the browser console (appears in Copy logs)
+    if (ratio > 0 && ratio < 1 && (ratio >= 0.75 || ratio <= 0.05)) {
+      dlog('autoTracker: progress', { t: Math.round(t*10)/10, d: Math.round(d*10)/10, ratio: Math.round(ratio*1000)/1000 });
+    }
+
     if (ratio >= 0.80) {
       tryAutoMarkWatched('80%');
     }
@@ -1550,10 +1570,16 @@ function titlesOf(node){
   function startAutoTracker(){
     // reattach whenever DOM changes (SPA)
     if (AUTO.obs) return;
+    dlog('autoTracker: startAutoTracker()');
 
     const kick = () => {
       const v = pickBestVideo();
-      if (v) attachToVideo(v);
+      if (v) {
+        attachToVideo(v);
+      } else {
+        // Likely iframe player; 80% tracking cannot work until a <video> exists in this document
+        dlog('autoTracker: no <video> in page (iframe player?)');
+      }
     };
 
     try {
