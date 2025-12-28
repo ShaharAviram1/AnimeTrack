@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.7.6
+// @version      1.7.7
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -37,6 +37,7 @@
 // @match        *://rapid-cloud.co/*
 // @match        *://vidcloud.to/*
 // @match        *://filemoon.sx/*
+// @match        *://*/*
 // ==/UserScript==
 
 (() => {
@@ -187,6 +188,41 @@
   const SEEDED_HOSTS = new Set([
     '9anime.to','aniwatch.to','aniwatchtv.to','gogoanime.dk','gogoanime.fi','gogoanimehd.to','hianime.to','hianime.tv','zoro.to'
   ]);
+
+  // Because we include a broad @match (*://*/*) to support unknown iframe player hosts,
+  // we MUST hard-guard execution:
+  // - Top-level pages: run only on MAL or enabled/seeded anime sites.
+  // - Iframes: run the frame tracker only when embedded by a supported anime site (via document.referrer).
+  function _hostNoWww(h){ return (h||'').replace(/^www\./i,'').toLowerCase(); }
+  function _referrerHost(){
+    try { return _hostNoWww(new URL(document.referrer || '').host); } catch { return ''; }
+  }
+
+  // Frame context: allow running only when the parent/referrer is one of the supported anime hosts.
+  const __AT_ALLOWED_FRAME = (function(){
+    try {
+      if (!isFrame) return false;
+      const rh = _referrerHost();
+      if (!rh) return false;
+      // Treat any known/seeded anime site as a valid parent.
+      return SEEDED_HOSTS.has(rh);
+    } catch { return false; }
+  })();
+
+  // Top-level context: if we are NOT on MAL and NOT on a seeded host, do nothing.
+  // (Enabled sites are checked later async; seeded list covers our default supported sites.)
+  const __AT_ALLOWED_TOP = (function(){
+    try {
+      if (isFrame) return false;
+      const h = _hostNoWww(location.host);
+      return (h === 'myanimelist.net') || SEEDED_HOSTS.has(h);
+    } catch { return false; }
+  })();
+
+  if (!__AT_ALLOWED_TOP && !__AT_ALLOWED_FRAME) {
+    // Broad match safety exit: prevents UI and logic from running on unrelated pages.
+    return;
+  }
   // Soft scoring priors per franchise base (no hard MAL IDs)
   const FRANCHISE_PRIORS = {
     'one piece': { prefer: 'tv', minEpisodes: 100 },
@@ -1591,7 +1627,7 @@ function titlesOf(node){
         attachToVideo(v);
       } else {
         // Likely iframe player; 80% tracking cannot work until a <video> exists in this document
-        dlog('autoTracker: no <video> in page (iframe player?)');
+        dlog('autoTracker: no <video> in page (iframe player?) — will rely on iframe tracker if available');
       }
     };
 
@@ -1737,7 +1773,10 @@ function titlesOf(node){
     } catch {}
   } else {
     // iframe context
-    try { startFrameTracker(); } catch {}
+    // Only run inside iframe players when embedded by a supported anime site.
+    try {
+      if (__AT_ALLOWED_FRAME) startFrameTracker();
+    } catch {}
   }
 
   // ---- Auto OAuth (message from oauth.html) ----
