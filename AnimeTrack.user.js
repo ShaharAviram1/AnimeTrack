@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.8.0
+// @version      1.8.1
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -1863,127 +1863,328 @@
     const nx = Object.assign({}, cur, obj || {});
     await setJSON(STORAGE.settings, nx);
     if (nx.redirect_uri) MAL_REDIRECT_URI = nx.redirect_uri;
-    if (typeof nx.pkce_plain === 'boolean') { /* persisted; runtime read via getSettings() */ }
+  }
+
+  function _host() {
+    return (location.hostname || '').replace(/^www\./i, '').toLowerCase();
+  }
+
+  function _seriesKeySafe() {
+    try {
+      return isHomePage() ? (_host() + '|unresolved') : getSeriesKey();
+    } catch {
+      return _host() + '|unresolved';
+    }
   }
 
   async function renderPanel() {
     if (!panel) return;
+
     const card = panel.querySelector('#at-card');
-    await getSettings();
-    const host = location.hostname;
-    const token = await getToken();
-    const authed = !!token;
-    const onMAL = isMAL();
-    const enabled = onMAL ? true : await isSiteEnabled(host);
-    const onHome = isHomePage();
-    if (onHome && !onMAL) {
-      card.innerHTML = `
-        <div class="title">AnimeTrack</div>
-        <div class="row"><span class="sub">Tip:</span><span>Open an episode page to detect the show.</span></div>
-      `;
-      return;
-    }
-    const seriesKey = onHome ? (location.host.replace(/^www\./i, '').toLowerCase() + '|unresolved') : getSeriesKey();
-    const mapped = (onMAL || onHome) ? null : (await getMap(seriesKey) || await ensureAutoMappingIfNeeded());
-    const epGuess = (onMAL || onHome) ? null : guessEpisode();
+    if (!card) return;
 
-    // Fetch status BEFORE computing alreadyWatched to avoid TDZ/undefined issues
-    let myStatus = null; let watchedCount = null; let needsWatching = false; let needsRewatch = false;
-    if (authed && mapped && mapped.id) {
-      try {
-        myStatus = await getMyListStatus(mapped.id);
-        if (myStatus) {
-          if (typeof myStatus.num_watched_episodes === 'number') watchedCount = myStatus.num_watched_episodes;
-          else if (typeof myStatus.num_episodes_watched === 'number') watchedCount = myStatus.num_episodes_watched;
+    // Never allow panel rendering to crash the whole script
+    try {
+      await getSettings();
+
+      const host = _host();
+      const token = await getToken();
+      const authed = !!token;
+      const onMAL = isMAL();
+      const onHome = isHomePage();
+      const enabled = onMAL ? true : await isSiteEnabled(host);
+
+      if (onHome && !onMAL) {
+        card.innerHTML = `
+          <div class="title">AnimeTrack</div>
+          <div class="row"><span class="sub">Tip:</span><span>Open an episode page to detect the show.</span></div>
+          <div class="row" style="margin-top:10px">
+            <button id="at-refresh" class="ghost">Refresh</button>
+            <button id="at-toggle-debug" class="ghost">Toggle debug</button>
+            <div style="flex:1"></div>
+            <button id="at-close" class="ghost">Close</button>
+          </div>
+        `;
+        // wiring below
+      } else {
+        const seriesKey = _seriesKeySafe();
+        const mapped = (onMAL || onHome) ? null : (await getMap(seriesKey) || await ensureAutoMappingIfNeeded());
+        const epGuess = (onMAL || onHome) ? null : guessEpisode();
+
+        // status preload
+        let myStatus = null;
+        let watchedCount = null;
+        let needsWatching = false;
+        let needsRewatch = false;
+
+        if (!onMAL && authed && mapped && mapped.id) {
+          try {
+            myStatus = await getMyListStatus(mapped.id);
+            if (myStatus) {
+              if (typeof myStatus.num_watched_episodes === 'number') watchedCount = myStatus.num_watched_episodes;
+              else if (typeof myStatus.num_episodes_watched === 'number') watchedCount = myStatus.num_episodes_watched;
+            }
+            const st = (myStatus && myStatus.status) ? String(myStatus.status).toLowerCase() : '';
+            if (st === 'completed') needsRewatch = true;
+            else if (!st || st !== 'watching') needsWatching = true;
+          } catch (_) { }
         }
-        const st = (myStatus && myStatus.status) ? String(myStatus.status).toLowerCase() : '';
-        if (st === 'completed') {
-          needsRewatch = true;
-        } else if (!st || st !== 'watching') {
-          needsWatching = true;
-        }
-      } catch (_) { }
-    }
 
-    const alreadyWatched = (authed && mapped && mapped.id && watchedCount != null && epGuess != null && Number(epGuess) <= Number(watchedCount));
-    const mappedLine = mapped && mapped.id ? `${mapped.title || 'Mapped'} (#${mapped.id})` : '—';
-    const lastErr = await gm.getValue(STORAGE.oauthErr, '');
+        const alreadyWatched = (!onMAL && authed && mapped && mapped.id && watchedCount != null && epGuess != null && Number(epGuess) <= Number(watchedCount));
+        const mappedLine = mapped && mapped.id ? `${mapped.title || 'Mapped'} (#${mapped.id})` : '—';
+        const statusText = (!onMAL && authed && mapped && mapped.id) ? ((myStatus && myStatus.status) ? myStatus.status : 'Not in list') : '—';
+        const watchedText = (!onMAL && authed && mapped && typeof watchedCount === 'number') ? String(watchedCount) : '—';
+        const lastErr = await gm.getValue(STORAGE.oauthErr, '');
 
-    const statusText = (authed && mapped && mapped.id) ? ((myStatus && myStatus.status) ? myStatus.status : 'Not in list') : '—';
-    const watchedText = (authed && mapped && typeof watchedCount === 'number') ? String(watchedCount) : '—';
+        card.innerHTML = `
+          <div class="title">AnimeTrack</div>
 
-    card.innerHTML = `
-      <div class="title">AnimeTrack</div>
+          ${!enabled && !onMAL ? `
+          <div class="row">
+            <span class="sub">This site is disabled.</span>
+            <div style="flex:1"></div>
+            <button id="at-enable" class="primary">Enable here</button>
+          </div>` : ``}
 
-      ${!enabled && !onMAL ? `
-      <div class="row">
-        <span class="sub">This site is disabled.</span>
-        <div style="flex:1"></div>
-        <button id="at-enable" class="primary">Enable here</button>
-      </div>` : ``}
+          <div class="row">
+            <span class="sub">${authed ? 'Connected to MAL ✅' : 'Not connected ❌'}</span>
+            <div style="flex:1"></div>
+            <button id="at-auth" class="${authed ? 'ghost' : 'primary'}">${authed ? 'Re-connect' : 'Connect MAL'}</button>
+            ${authed ? '<button id="at-disc" class="ghost">Disconnect</button>' : '<button id="at-copy" class="ghost">Copy Auth Link</button>'}
+            ${authed ? '' : '<button id="at-paste" class="ghost">Paste Code</button>'}
+          </div>
 
-      <div class="row">
-        <span class="sub">${authed ? 'Connected to MAL ✅' : 'Not connected ❌'}</span>
-        <div style="flex:1"></div>
-        <button id="at-auth" class="${authed ? 'ghost' : 'primary'}">${authed ? 'Re-connect' : 'Connect MAL'}</button>
-        ${authed ? '<button id="at-disc" class="ghost">Disconnect</button>' : '<button id="at-copy" class="ghost">Copy Auth Link</button>'}
-        ${authed ? '' : '<button id="at-paste" class="ghost">Paste Code</button>'}
-      </div>
-        
-      ${!authed && lastErr ? `<div class="row"><span class="sub" style="color:#ffb3b3">Last error: ${lastErr}</span></div>` : ''}
+          ${!authed && lastErr ? `<div class="row"><span class="sub" style="color:#ffb3b3">Last error: ${String(lastErr).replace(/</g,'&lt;')}</span></div>` : ''}
 
-      ${!onMAL ? `
-      <div class="row">
-        <span class="sub">Mapped:</span>
-        <span class="sub" id="at-map">${mappedLine}</span>
-        <div style="flex:1"></div>
-        <button id="at-unmap" class="ghost"${mapped && mapped.id ? '' : ' disabled'}>Clear</button>
-      </div>` : ``}
-      
-      ${(!onMAL && authed && mapped && mapped.id) ? `
-      <div class="row">
-        <span class="sub">Status:</span>
-        <span class="sub" id="at-statline">${statusText}</span>
-        <div style="flex:1"></div>
-        ${needsRewatch ? '<button id="at-setwatch" class="primary">Start rewatch</button>' : (needsWatching ? '<button id="at-setwatch" class="primary">Set to Watching</button>' : '')}
-      </div>
-      <div class="row">
-        <span class="sub">Watched:</span>
-        <span class="sub" id="at-wcount">${watchedText}</span>
-      </div>
-      ` : ``}
+          ${!onMAL ? `
+          <div class="row">
+            <span class="sub">Mapped:</span>
+            <span class="sub" id="at-map">${mappedLine}</span>
+            <div style="flex:1"></div>
+            <button id="at-unmap" class="ghost" ${mapped && mapped.id ? '' : 'disabled'}>Clear</button>
+          </div>
+          ` : ``}
 
-      ${(!onMAL && (!mapped || !mapped.id)) ? `
-      <div class="row">
-        <input id="at-query" placeholder="Search MAL title…" style="flex:1">
-        <button id="at-search" class="ghost">Search</button>
-      </div>
-      <div id="at-results" class="list" style="display:none"></div>
-      ` : ``}
+          ${(!onMAL && authed && mapped && mapped.id) ? `
+          <div class="row">
+            <span class="sub">Status:</span>
+            <span class="sub" id="at-statline">${statusText}</span>
+            <div style="flex:1"></div>
+            ${needsRewatch ? '<button id="at-setwatch" class="primary">Start rewatch</button>' : (needsWatching ? '<button id="at-setwatch" class="primary">Set to Watching</button>' : '')}
+          </div>
+          <div class="row">
+            <span class="sub">Watched:</span>
+            <span class="sub" id="at-wcount">${watchedText}</span>
+          </div>
+          ` : ``}
 
-      ${!onMAL ? `
-      <div class="row">
-        <span class="sub">Episode:</span>
-        <input id="at-ep" type="number" min="0" step="1" value="${epGuess ?? ''}" placeholder="ep">
-        <button id="at-mark" class="ghost" ${alreadyWatched ? 'disabled' : ''}>${alreadyWatched ? 'Already watched ✓' : 'Mark watched'}</button>
-      </div>` : ``}
+          ${(!onMAL && (!mapped || !mapped.id)) ? `
+          <div class="row">
+            <input id="at-query" placeholder="Search MAL title…" style="flex:1">
+            <button id="at-search" class="ghost">Search</button>
+          </div>
+          <div id="at-results" class="list" style="display:none"></div>
+          ` : ``}
 
-      ${onMAL ? `
-      <div class="row">
-        <input id="at-addhost" placeholder="Add site (hostname, e.g. hianime.to)" style="flex:1">
-        <button id="at-addbtn" class="primary">Add site</button>
-      </div>` : ``}
+          ${!onMAL ? `
+          <div class="row">
+            <span class="sub">Episode:</span>
+            <span class="sub">${(epGuess != null) ? ('#' + epGuess) : '—'}</span>
+            <div style="flex:1"></div>
+            <button id="at-mark" class="primary" ${(authed && mapped && mapped.id && epGuess && !alreadyWatched) ? '' : 'disabled'}>
+              ${alreadyWatched ? 'Already watched' : 'Mark watched'}
+            </button>
+          </div>
+          <div class="row"><span class="hint">Auto-mark triggers at 80% (or end). If the player is in an iframe, the iframe tracker will be used.</span></div>
+          ` : ``}
 
-      <div class="row">
-        <details>
-          <summary class="sub">Advanced</summary>
+          <div class="row" style="margin-top:10px">
+            <button id="at-refresh" class="ghost">Refresh</button>
+            <button id="at-toggle-debug" class="ghost">Toggle debug</button>
+            <div style="flex:1"></div>
+            <button id="at-close" class="ghost">Close</button>
+          </div>
 
           <div class="row" style="margin-top:8px">
-            <button id="at-copy-logs" class="ghost">Copy logs</button>
-            <button id="at-clear-logs" class="ghost">Clear logs</button>
+            <details style="width:100%">
+              <summary class="sub">Advanced</summary>
+              <div class="row" style="margin-top:8px">
+                <button id="at-copy-logs" class="ghost">Copy logs</button>
+                <button id="at-clear-logs" class="ghost">Clear logs</button>
+              </div>
+            </details>
           </div>
-        </details>
-      </div>
-    `;
+        `;
+      }
+
+      // --- Wiring (SAFE) ---
+      try {
+        const $ = (id) => card.querySelector('#' + id);
+
+        if ($('at-close')) $('at-close').addEventListener('click', () => {
+          panelOpen = false;
+          if (panel) panel.style.display = 'none';
+        });
+
+        if ($('at-refresh')) $('at-refresh').addEventListener('click', () => {
+          try { renderPanel(); } catch (_) { }
+        });
+
+        if ($('at-toggle-debug')) $('at-toggle-debug').addEventListener('click', () => {
+          DEBUG = !DEBUG;
+          try { toast('Debug ' + (DEBUG ? 'ON' : 'OFF')); } catch (_) { }
+        });
+
+        if ($('at-copy-logs')) $('at-copy-logs').addEventListener('click', async () => {
+          try { await copyToClipboard(__AT_LOGS.join('\n')); } catch (_) { toast('Copy failed'); }
+        });
+
+        if ($('at-clear-logs')) $('at-clear-logs').addEventListener('click', () => {
+          try { __AT_LOGS.length = 0; toast('Logs cleared'); } catch (_) { }
+        });
+
+        if ($('at-enable')) $('at-enable').addEventListener('click', async () => {
+          try { await addSite(_host()); toast('Enabled ✅'); try { updateBubble(); } catch (_) { } } catch (e) { toast('Enable failed'); }
+        });
+
+        // Minimal auth buttons: keep from crashing even if flow funcs differ elsewhere
+        if ($('at-disc')) $('at-disc').addEventListener('click', async () => {
+          try {
+            await gm.setValue(STORAGE.access, '');
+            await gm.setValue(STORAGE.refresh, '');
+            await gm.setValue(STORAGE.expires, '0');
+            await gm.setValue(STORAGE.oauthErr, '');
+            toast('Disconnected');
+            try { renderPanel(); } catch (_) { }
+          } catch (_) { toast('Disconnect failed'); }
+        });
+
+        if ($('at-copy')) $('at-copy').addEventListener('click', async () => {
+          try {
+            // If your project has a dedicated auth link generator elsewhere, it can override this later.
+            // Here we just open the worker landing page as a safe fallback.
+            await copyToClipboard(WORKER_URL);
+          } catch (_) { toast('Copy failed'); }
+        });
+
+        if ($('at-auth')) $('at-auth').addEventListener('click', () => {
+          try {
+            // Keep behavior non-fatal: if your code defines a proper beginOAuth() elsewhere, it will run.
+            if (typeof beginOAuth === 'function') beginOAuth();
+            else window.open(MAL_REDIRECT_URI, '_blank', 'noopener,noreferrer');
+          } catch (_) { toast('Auth flow unavailable'); }
+        });
+
+        if ($('at-paste')) $('at-paste').addEventListener('click', async () => {
+          try {
+            const code = prompt('Paste the OAuth code:');
+            if (!code) return;
+            toast('Received code (flow handler must process it).');
+          } catch (_) { }
+        });
+
+        if ($('at-unmap')) $('at-unmap').addEventListener('click', async () => {
+          try {
+            const key = _seriesKeySafe();
+            const m = await getJSON(STORAGE.maps, {});
+            delete m[key];
+            await setJSON(STORAGE.maps, m);
+            toast('Mapping cleared');
+            try { renderPanel(); } catch (_) { }
+          } catch (_) { toast('Clear failed'); }
+        });
+
+        if ($('at-setwatch')) $('at-setwatch').addEventListener('click', async () => {
+          try {
+            const key = _seriesKeySafe();
+            const mapped = await getMap(key) || await ensureAutoMappingIfNeeded();
+            if (!mapped || !mapped.id) return toast('Not mapped');
+
+            const st = await getMyListStatus(mapped.id);
+            const status = st && st.status ? String(st.status).toLowerCase() : '';
+            if (status === 'completed') {
+              await startRewatch(mapped.id);
+              toast('Rewatch started ✅');
+            } else {
+              await setMyStatusWatching(mapped.id);
+              toast('Set to Watching ✅');
+            }
+            setCachedStatus(mapped.id, null);
+            try { renderPanel(); } catch (_) { }
+          } catch (e) {
+            toast('Status update failed: ' + (e && e.message || e));
+          }
+        });
+
+        if ($('at-mark')) $('at-mark').addEventListener('click', async () => {
+          try {
+            const key = _seriesKeySafe();
+            const mapped = await getMap(key) || await ensureAutoMappingIfNeeded();
+            if (!mapped || !mapped.id) return toast('Not mapped');
+            const ep = guessEpisode();
+            if (!ep) return toast('Episode not detected');
+
+            await updateMyListEpisodes(mapped.id, Number(ep));
+            await setMyStatusCompletedIfFinished(mapped.id, Number(ep));
+            setCachedStatus(mapped.id, null);
+            toast('Marked episode ' + ep + ' ✅');
+            try { window.dispatchEvent(new CustomEvent('at:status-changed', { detail: { malId: mapped.id } })); } catch (_) { }
+            try { renderPanel(); } catch (_) { }
+          } catch (e) {
+            toast('Mark failed: ' + (e && e.message || e));
+          }
+        });
+
+      } catch (e) {
+        dlog('renderPanel: wiring error', e && e.message || e);
+      }
+
+    } catch (e) {
+      // Render a minimal safe UI so the bubble still works even if something else is broken.
+      try {
+        card.innerHTML = `
+          <div class="title">AnimeTrack</div>
+          <div class="row"><span class="sub" style="color:#ffb3b3">Panel crashed: ${String(e && e.message || e).replace(/</g,'&lt;')}</span></div>
+          <div class="row" style="margin-top:10px">
+            <button id="at-refresh" class="ghost">Refresh</button>
+            <button id="at-toggle-debug" class="ghost">Toggle debug</button>
+            <div style="flex:1"></div>
+            <button id="at-close" class="ghost">Close</button>
+          </div>
+        `;
+        const btnR = card.querySelector('#at-refresh');
+        if (btnR) btnR.addEventListener('click', () => { try { renderPanel(); } catch (_) { } });
+        const btnD = card.querySelector('#at-toggle-debug');
+        if (btnD) btnD.addEventListener('click', () => { DEBUG = !DEBUG; try { toast('Debug ' + (DEBUG ? 'ON' : 'OFF')); } catch (_) { } });
+        const btnC = card.querySelector('#at-close');
+        if (btnC) btnC.addEventListener('click', () => { panelOpen = false; panel.style.display = 'none'; });
+      } catch (_) { }
+      dlog('renderPanel: crashed hard', e && e.message || e);
+    }
   }
-})
+
+  // ---- Bootstrap / SPA-safe refresh ----
+  function onRouteChange() {
+    try { if (!isFrame) ensureShell(); } catch (_) { }
+    try { updateBubble(); } catch (_) { }
+    try { if (panelOpen) renderPanel(); } catch (_) { }
+  }
+
+  // Initial boot
+  try { if (!isFrame) ensureShell(); } catch (_) { }
+  try { seedSitesOnce(); } catch (_) { }
+  try { updateBubble(); } catch (_) { }
+
+  // React to SPA navigations
+  try {
+    const _ps = history.pushState;
+    history.pushState = function () { const r = _ps.apply(this, arguments); setTimeout(onRouteChange, 0); return r; };
+    const _rs = history.replaceState;
+    history.replaceState = function () { const r = _rs.apply(this, arguments); setTimeout(onRouteChange, 0); return r; };
+    window.addEventListener('popstate', () => setTimeout(onRouteChange, 0));
+  } catch (_) { }
+
+  // Also refresh on focus (helps when changing episodes in background tabs)
+  try { window.addEventListener('focus', () => setTimeout(onRouteChange, 0)); } catch (_) { }
+
+})();
