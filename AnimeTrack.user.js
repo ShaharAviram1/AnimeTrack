@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.7.1
+// @version      1.7.2
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -48,7 +48,26 @@
   } catch {}
 
   let DEBUG = true; // can be toggled at runtime
+  const __AT_LOGS = [];
+  const __AT_LOG_MAX = 500;
+
+  function __atPushLog(args){
+    try {
+      const ts = new Date().toISOString();
+      const msg = Array.from(args).map(a => {
+        if (a instanceof Error) return a.message;
+        if (typeof a === 'string') return a;
+        try { return JSON.stringify(a); } catch { return String(a); }
+      }).join(' ');
+      __AT_LOGS.push(`${ts} ${msg}`);
+      if (__AT_LOGS.length > __AT_LOG_MAX) {
+        __AT_LOGS.splice(0, __AT_LOGS.length - __AT_LOG_MAX);
+      }
+    } catch {}
+  }
+
   function dlog(){
+    __atPushLog(arguments);
     if (!DEBUG) return;
     try { console.log('[AnimeTrack]', ...arguments); } catch {}
   }
@@ -57,7 +76,13 @@
     window.AnimeTrackDebug = {
       on(){ DEBUG = true; try { console.log('[AnimeTrack] DEBUG ON'); } catch {} },
       off(){ DEBUG = false; try { console.log('[AnimeTrack] DEBUG OFF'); } catch {} },
-      toggle(){ DEBUG = !DEBUG; try { console.log('[AnimeTrack] DEBUG', DEBUG); } catch {} }
+      toggle(){ DEBUG = !DEBUG; try { console.log('[AnimeTrack] DEBUG', DEBUG); } catch {} },
+      logs(){ return __AT_LOGS.slice(); },
+      dump(){ return __AT_LOGS.join('\n'); },
+      clear(){
+        __AT_LOGS.length = 0;
+        try { console.log('[AnimeTrack] logs cleared'); } catch {}
+      }
     };
   } catch {}
 
@@ -1522,6 +1547,8 @@ function titlesOf(node){
       </div>
       <div class="row" style="margin-top:8px">
         <button id="at-status" class="ghost">Check MAL status</button>
+        <button id="at-copylogs" class="ghost">Copy logs</button>
+        <button id="at-clearlogs" class="ghost">Clear logs</button>
         <span class="sub" id="at-status-out"></span>
       </div>
       <div class="row">
@@ -1629,6 +1656,22 @@ function titlesOf(node){
         await gm.setValue(STORAGE.oauthErr, 'OAuth failed: ' + msg);
         await renderPanel();
       }
+    };
+    const copyLogsBtn = card.querySelector('#at-copylogs');
+    if (copyLogsBtn) copyLogsBtn.onclick = async () => {
+      try {
+        const txt = window.AnimeTrackDebug?.dump?.() || '(no logs)';
+        await navigator.clipboard.writeText(txt);
+        toast('Logs copied');
+      } catch {
+        toast('Could not copy logs');
+      }
+    };
+
+    const clearLogsBtn = card.querySelector('#at-clearlogs');
+    if (clearLogsBtn) clearLogsBtn.onclick = () => {
+      try { window.AnimeTrackDebug?.clear?.(); } catch {}
+      toast('Logs cleared');
     };
 
     async function buildAuthURL(){
@@ -1844,19 +1887,55 @@ function titlesOf(node){
       maybeScrobbleOnce().catch((e)=>dlog('maybeScrobbleOnce error', e && e.message));
     }
 
-    const attach = ()=>{
-      const vids = Array.from(document.querySelectorAll('video'));
-      if (!vids.length) return;
-      for (const vid of vids){
-        if (vid && !vid.__at_scrobble){
-          vid.addEventListener('timeupdate', onTimeUpdate, { passive: true });
-          vid.addEventListener('loadedmetadata', onTimeUpdate, { passive: true });
-          vid.addEventListener('playing', onTimeUpdate, { passive: true });
-          vid.__at_scrobble = true;
-          dlog('setupScrobble: attached to video', { dur: vid.duration, src: (vid.currentSrc || vid.src || '').slice(0,120) });
+    function attachInDoc(doc, label){
+      try {
+        const vids = Array.from(doc.querySelectorAll('video'));
+        if (!vids.length) return;
+
+        for (const vid of vids){
+          if (!vid.__at_scrobble){
+            vid.addEventListener('timeupdate', onTimeUpdate, { passive:true });
+            vid.addEventListener('loadedmetadata', onTimeUpdate, { passive:true });
+            vid.addEventListener('playing', onTimeUpdate, { passive:true });
+            vid.__at_scrobble = true;
+            dlog('scrobble: attached', label || 'doc');
+          }
+        }
+      } catch (e){
+        dlog('scrobble attach failed', label, e?.message);
+      }
+    }
+
+    function scanAndAttach(){
+      attachInDoc(document, 'top');
+
+      const iframes = Array.from(document.querySelectorAll('iframe'));
+      for (const fr of iframes){
+        try {
+          const src = (fr.getAttribute('src') || '').trim();
+          const sb = (fr.getAttribute('sandbox') || '').trim();
+
+          // Skip sandboxed about:blank frames (HiAnime anti-devtools)
+          if (src === 'about:blank' && sb && !/allow-same-origin/i.test(sb)) continue;
+
+          const doc = fr.contentDocument;
+          if (!doc) continue;
+
+          attachInDoc(doc, 'iframe');
+        } catch {
+          // cross-origin iframe → ignore safely
         }
       }
-    };
+    }
+
+    const attach = () => scanAndAttach();
+
+    // periodic rescan (HiAnime swaps players dynamically)
+    if (!setupScrobble.__interval){
+      setupScrobble.__interval = setInterval(() => {
+        try { scanAndAttach(); } catch {}
+      }, 2000);
+    }
 
     attach();
     const mo = new MutationObserver(()=>attach());
