@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.7.7
+// @version      1.7.8
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -189,6 +189,28 @@
     '9anime.to','aniwatch.to','aniwatchtv.to','gogoanime.dk','gogoanime.fi','gogoanimehd.to','hianime.to','hianime.tv','zoro.to'
   ]);
 
+  // ---- Execution guard for broad @match (top vs iframe) ----
+  // If the userscript is configured with a wide @match (e.g. *://*/*),
+  // we must *only* run on:
+  // 1) top-level pages for MAL or known anime sites, OR
+  // 2) iframe player pages whose `document.referrer` is one of our known anime sites.
+  // Otherwise we bail out early (prevents running on random sites and breaking bubble/UI).
+  const __AT_HOST = (location.hostname || '').replace(/^www\./i,'').toLowerCase();
+  const __AT_IS_FRAME = (()=>{ try { return window.top !== window.self; } catch { return true; }})();
+  const __AT_REF_HOST = (()=>{
+    try {
+      const r = document.referrer || '';
+      if (!r) return '';
+      return (new URL(r)).hostname.replace(/^www\./i,'').toLowerCase();
+    } catch { return ''; }
+  })();
+  const __AT_ALLOW_TOP = (__AT_HOST === 'myanimelist.net' || SEEDED_HOSTS.has(__AT_HOST));
+  const __AT_ALLOW_FRAME = (__AT_IS_FRAME && !!__AT_REF_HOST && (SEEDED_HOSTS.has(__AT_REF_HOST) || __AT_REF_HOST === 'myanimelist.net'));
+  if (!__AT_ALLOW_TOP && !__AT_ALLOW_FRAME) {
+    try { /* keep completely quiet on unrelated sites */ } catch {}
+    return;
+  }
+
   // Because we include a broad @match (*://*/*) to support unknown iframe player hosts,
   // we MUST hard-guard execution:
   // - Top-level pages: run only on MAL or enabled/seeded anime sites.
@@ -257,7 +279,7 @@
 
   const qsa = (s, r=document) => Array.from(r.querySelectorAll(s));
   const qs = (s, r=document) => r.querySelector(s);
-  const isFrame = (window.top !== window.self);
+  const isFrame = __AT_IS_FRAME;
   function norm(s){ return (s||'').replace(/\s+/g,' ').trim(); }
   function encodeForm(obj){ return Object.keys(obj).map(k => `${encodeURIComponent(k)}=${encodeURIComponent(obj[k])}`).join('&'); }
   function titleCase(s){ return (s||'').split(' ').map(w => w ? (w[0].toUpperCase()+w.slice(1)) : w).join(' '); }
@@ -597,7 +619,7 @@
   };
 
   function getProviderForHost(host) {
-    host = host.replace(/^www\./i,'').toLowerCase();
+    host = (host || '').replace(/^www\./i,'').toLowerCase();
     for (const key in PROVIDERS) {
       if (PROVIDERS[key].domains.includes(host)) return PROVIDERS[key];
     }
