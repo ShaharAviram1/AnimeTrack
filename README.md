@@ -1,10 +1,12 @@
 # AnimeTrack
 
-Fast anime scrobbler for MyAnimeList with a tiny, clean UI.
+Fast anime scrobbler for MyAnimeList with a focused floating UI.
 
-- Per-site **Enable here** toggle (add any site without reinstalling)
+- Built-in support for **Animetsu** and HiAnime-style sites
+- **Site profiles** for adding new hosts without editing the script
+- Per-site **Enable here** toggle
 - **MAL OAuth (PKCE)** — access + refresh tokens stored via GM storage
-- **Search + map** the current series to a MAL ID (stored per `host|slug`)
+- **Search + map** the current series to a MAL ID (stored per provider-aware site key)
 - **Auto-mark watched** at ~80% playback (or manual mark)
 - **Shadow DOM** panel, no jQuery, no icon fonts
 
@@ -22,7 +24,7 @@ Fast anime scrobbler for MyAnimeList with a tiny, clean UI.
 This uses MAL's official OAuth flow with PKCE (plain) and the existing callback path `https://malsync.moe/mal/oauth`. The script matches `*://*/*`, so the callback page executes and stores tokens.
 
 ## Mappings
-Series mapping key: `hostname | first-path-segment`, e.g., `hianime.to|watch`.
+Series mapping keys are provider-aware, so slug sites and numeric-id sites can both map reliably.
 You can clear mapping from the panel, or remap by searching again.
 
 ## Privacy

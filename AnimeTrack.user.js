@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
-// @description  Fast anime scrobbler for MAL: auto-map titles, seeded anime sites, MAL OAuth (PKCE S256), auto-mark at 80%, clean Shadow-DOM UI.
-// @version      1.8.1
+// @description  Fast anime scrobbler for MAL: adaptive site profiles, auto-map titles, MAL OAuth (PKCE S256), auto-mark at 80%, focused Shadow-DOM UI.
+// @version      1.9.0
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -25,6 +25,7 @@
 // @match        *://myanimelist.net/*
 // @match        *://hianime.to/*
 // @match        *://hianime.tv/*
+// @match        *://animetsu.bz/*
 // @match        *://aniwatch.to/*
 // @match        *://aniwatchtv.to/*
 // @match        *://9anime.to/*
@@ -161,6 +162,7 @@
     access: 'animetrack.malToken',
     refresh: 'animetrack.malRefresh',
     sites: 'animetrack.sites',
+    siteProfiles: 'animetrack.siteProfiles',
     maps: 'animetrack.seriesMaps',
     seeded: 'animetrack.seeded',
     settings: 'animetrack.settings',
@@ -185,14 +187,34 @@
     if (data === null) { SESSION.statusCache.delete(id); return; } // bust
     SESSION.statusCache.set(id, { ts: Date.now(), data });
   }
+
+  function getJSONSync(key, fallback) {
+    try {
+      if (typeof GM_getValue !== 'function') return fallback;
+      const raw = GM_getValue(key, '');
+      return raw ? JSON.parse(raw) : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
   const SEEDED_HOSTS = new Set([
-    '9anime.to', 'aniwatch.to', 'aniwatchtv.to', 'gogoanime.dk', 'gogoanime.fi', 'gogoanimehd.to', 'hianime.to', 'hianime.tv', 'zoro.to'
+    '9anime.to', 'aniwatch.to', 'aniwatchtv.to', 'animetsu.bz', 'animetsu.tv', 'gogoanime.dk', 'gogoanime.fi', 'gogoanimehd.to', 'hianime.to', 'hianime.tv', 'zoro.to'
   ]);
 
   // Known player/embed hosts (often cross-origin iframes). We allow running the *frame tracker* here
   // even when document.referrer is empty due to Referrer-Policy.
   const PLAYER_HOSTS = new Set([
     'megacloud.tv', 'megacloud.blog', 'rapid-cloud.co', 'vidcloud.to', 'filemoon.sx'
+  ]);
+
+  const BOOT_SITE_LIST = new Set(getJSONSync(STORAGE.sites, []).map(h => String(h || '').replace(/^www\./i, '').toLowerCase()).filter(Boolean));
+  const BOOT_SITE_PROFILES = getJSONSync(STORAGE.siteProfiles, {});
+  const SITE_PROFILES = Object.assign({}, BOOT_SITE_PROFILES);
+  const HOST_ALLOWLIST = new Set([
+    ...Array.from(SEEDED_HOSTS),
+    ...Array.from(BOOT_SITE_LIST),
+    ...Object.keys(BOOT_SITE_PROFILES || {}).map(h => String(h || '').replace(/^www\./i, '').toLowerCase()).filter(Boolean)
   ]);
 
   // ---- Execution guard for broad @match (top vs iframe) ----
@@ -210,10 +232,10 @@
       return (new URL(r)).hostname.replace(/^www\./i, '').toLowerCase();
     } catch { return ''; }
   })();
-  const __AT_ALLOW_TOP = (__AT_HOST === 'myanimelist.net' || SEEDED_HOSTS.has(__AT_HOST));
+  const __AT_ALLOW_TOP = (__AT_HOST === 'myanimelist.net' || HOST_ALLOWLIST.has(__AT_HOST));
   // Allow iframe execution when embedded by a supported anime site OR when the iframe host itself is a known player host.
   // Some players set Referrer-Policy so referrer may be empty; in that case we still want the frame tracker.
-  const __AT_ALLOW_FRAME = (__AT_IS_FRAME && ((!!__AT_REF_HOST && (SEEDED_HOSTS.has(__AT_REF_HOST) || __AT_REF_HOST === 'myanimelist.net')) || PLAYER_HOSTS.has(__AT_HOST)));
+  const __AT_ALLOW_FRAME = (__AT_IS_FRAME && ((!!__AT_REF_HOST && (HOST_ALLOWLIST.has(__AT_REF_HOST) || __AT_REF_HOST === 'myanimelist.net')) || PLAYER_HOSTS.has(__AT_HOST)));
   dlog('execGuard:', { host: __AT_HOST, isFrame: __AT_IS_FRAME, refHost: __AT_REF_HOST, allowTop: __AT_ALLOW_TOP, allowFrame: __AT_ALLOW_FRAME });
   if (!__AT_ALLOW_TOP && !__AT_ALLOW_FRAME) {
     try { /* keep completely quiet on unrelated sites */ } catch { }
@@ -266,10 +288,10 @@
 
   function _decSlug(s) { try { return decodeURIComponent(s); } catch { return s || ''; } }
   // Extract a canonical series slug from a pathname
-  function extractSeriesSlugFromPath(pathname) {
+  function extractSeriesSlugFromPath(pathname, customPrefixes) {
     dlog('extractSeriesSlugFromPath: in', pathname);
     const parts = (pathname || '').split('/').filter(Boolean);
-    const prefixes = new Set(['watch', 'anime', 'series', 'stream', 'show']);
+    const prefixes = new Set((customPrefixes && customPrefixes.length ? customPrefixes : ['watch', 'anime', 'series', 'stream', 'show']).map(x => String(x || '').toLowerCase()));
     let slug = parts.length > 1 && prefixes.has((parts[0] || '').toLowerCase()) ? parts[1] : (parts[0] || '');
     slug = _decSlug(String(slug).toLowerCase());
     // strip episode tails like -episode-12, -ep-12, -e12, -season-2, -s2
@@ -311,30 +333,191 @@
     const style = document.createElement('style');
     style.textContent = `
       :host { all: initial; }
-      .bubble { position: fixed; right: 16px; bottom: 16px; width: 28px; height: 28px;
-                border-radius: 50%; background:#2d7ef7; color:#fff; display:flex; align-items:center;
-                justify-content:center; font-weight:700; font-size:12px; box-shadow:0 6px 18px rgba(0,0,0,.35);
-                cursor:pointer; z-index:2147483647; }
-      .bubble.disabled { background:#5b6b87; opacity:.9 }
-      .panel { position: fixed; right: 16px; bottom: 56px; z-index: 2147483647;
-               font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu; }
-      .card { background: rgba(18,18,18,.94); color: #fff; border-radius: 14px; box-shadow: 0 8px 24px rgba(0,0,0,.35);
-              padding: 12px 14px; min-width: 360px; }
-      .row { display:flex; align-items:center; gap:10px; }
-      .title { font-weight:700; font-size:14px; margin-bottom:8px; opacity:.95 }
-      .sub { font-size:12px; opacity:.75; }
-      button { border:0; border-radius:10px; padding:8px 10px; cursor:pointer; font-weight:600; }
-      .primary { background:#2d7ef7; color:#fff; }
-      .ghost { background:transparent; color:#fff; border:1px solid #ffffff2a; }
-      input { border:1px solid #ffffff2a; background:transparent; color:#fff; border-radius:8px; padding:6px 8px; }
-      input[type="number"]{ width:110px; }
-      .row + .row { margin-top:8px; }
-      .list { margin-top:8px; max-height:160px; overflow:auto; border:1px solid #ffffff1a; border-radius:10px; }
-      .li { padding:8px; border-bottom:1px solid #ffffff10; cursor:pointer; }
-      .li:hover { background:#ffffff10; }
-      .toast { position: fixed; right: 16px; bottom: 96px; background: rgba(18,18,18,.94); color:#fff;
-               padding:10px 12px; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.35); }
-      .hint { font-size:11px; opacity:.7 }
+      .bubble, .panel, .toast { font-family: "Avenir Next", "Trebuchet MS", "Segoe UI", sans-serif; }
+      .bubble {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        width: 46px;
+        height: 46px;
+        border-radius: 16px;
+        background: linear-gradient(135deg, #4f8cff 0%, #2f65ff 54%, #ff8247 100%);
+        color: #f8fbff;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 800;
+        font-size: 13px;
+        letter-spacing: .08em;
+        box-shadow: 0 18px 44px rgba(5, 11, 24, .45);
+        cursor: pointer;
+        z-index: 2147483647;
+        border: 1px solid rgba(255,255,255,.22);
+        backdrop-filter: blur(10px);
+        transition: transform .18s ease, box-shadow .18s ease, opacity .18s ease;
+      }
+      .bubble:hover { transform: translateY(-2px) scale(1.02); box-shadow: 0 22px 52px rgba(5, 11, 24, .55); }
+      .bubble.disabled { background: linear-gradient(135deg, #516178 0%, #394454 100%); opacity: .96; }
+      .panel {
+        position: fixed;
+        right: 18px;
+        bottom: 74px;
+        z-index: 2147483647;
+      }
+      .card {
+        width: min(420px, calc(100vw - 24px));
+        max-height: min(78vh, 760px);
+        overflow: auto;
+        background:
+          radial-gradient(circle at top right, rgba(255,130,71,.16), transparent 30%),
+          radial-gradient(circle at top left, rgba(79,140,255,.18), transparent 28%),
+          linear-gradient(180deg, rgba(20,28,43,.98) 0%, rgba(9,13,21,.98) 100%);
+        color: #f5f8ff;
+        border-radius: 24px;
+        box-shadow: 0 28px 64px rgba(0,0,0,.45);
+        border: 1px solid rgba(255,255,255,.08);
+        padding: 18px;
+        animation: at-pop .18s ease-out;
+      }
+      @keyframes at-pop {
+        from { opacity: 0; transform: translateY(8px) scale(.985); }
+        to { opacity: 1; transform: translateY(0) scale(1); }
+      }
+      .at-shell { display: flex; flex-direction: column; gap: 14px; }
+      .at-header { display:flex; align-items:flex-start; gap:12px; }
+      .at-brand { display:flex; flex-direction:column; gap:4px; min-width:0; }
+      .eyebrow { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: rgba(206,221,255,.72); }
+      .headline { font-size: 22px; line-height: 1.05; font-weight: 800; letter-spacing: -.03em; }
+      .muted { font-size: 12px; color: rgba(215,226,247,.72); }
+      .subtle { color: rgba(215,226,247,.58); }
+      .icon-btn, button {
+        border: 0;
+        border-radius: 14px;
+        padding: 10px 12px;
+        cursor: pointer;
+        font-weight: 700;
+        transition: transform .14s ease, opacity .14s ease, background .14s ease, border-color .14s ease;
+      }
+      .icon-btn:hover, button:hover { transform: translateY(-1px); }
+      .icon-btn {
+        margin-left: auto;
+        background: rgba(255,255,255,.06);
+        color: #fff;
+        min-width: 42px;
+      }
+      .surface {
+        background: rgba(255,255,255,.05);
+        border: 1px solid rgba(255,255,255,.08);
+        border-radius: 18px;
+        padding: 14px;
+      }
+      .hero { display:flex; flex-direction:column; gap:10px; }
+      .chip-row, .actions, .row, .grid-2 { display:flex; gap:10px; flex-wrap:wrap; }
+      .chip {
+        display:inline-flex;
+        align-items:center;
+        gap:6px;
+        padding: 8px 10px;
+        border-radius: 999px;
+        background: rgba(255,255,255,.06);
+        border: 1px solid rgba(255,255,255,.08);
+        font-size: 12px;
+        color: rgba(245,248,255,.92);
+      }
+      .metric {
+        flex: 1 1 110px;
+        min-width: 110px;
+        background: rgba(255,255,255,.04);
+        border-radius: 16px;
+        padding: 12px;
+        border: 1px solid rgba(255,255,255,.06);
+      }
+      .metric .label { display:block; font-size:11px; text-transform:uppercase; letter-spacing:.12em; color: rgba(206,221,255,.6); margin-bottom: 6px; }
+      .metric .value { display:block; font-size:15px; font-weight:700; }
+      .actions { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .primary {
+        background: linear-gradient(135deg, #5d9bff 0%, #2f65ff 100%);
+        color: #fff;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.2);
+      }
+      .ghost {
+        background: rgba(255,255,255,.04);
+        color: #f5f8ff;
+        border: 1px solid rgba(255,255,255,.1);
+      }
+      .danger {
+        background: rgba(255,93,93,.12);
+        color: #ffc5c5;
+        border: 1px solid rgba(255,93,93,.18);
+      }
+      button[disabled] { opacity: .46; cursor: not-allowed; transform: none !important; }
+      .field-grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:10px; }
+      .field { display:flex; flex-direction:column; gap:6px; min-width:0; }
+      .field label { font-size:11px; text-transform:uppercase; letter-spacing:.12em; color: rgba(206,221,255,.62); }
+      input, select {
+        border: 1px solid rgba(255,255,255,.12);
+        background: rgba(7,10,16,.58);
+        color: #fff;
+        border-radius: 12px;
+        padding: 10px 11px;
+        min-width: 0;
+      }
+      select { appearance: none; }
+      .stack { display:flex; flex-direction:column; gap:10px; }
+      .results {
+        display:flex;
+        flex-direction:column;
+        gap:8px;
+        max-height: 220px;
+        overflow: auto;
+      }
+      .result {
+        text-align:left;
+        width:100%;
+        background: rgba(255,255,255,.04);
+        border: 1px solid rgba(255,255,255,.08);
+        border-radius: 14px;
+        padding: 11px 12px;
+        color:#fff;
+      }
+      .result strong { display:block; font-size:13px; margin-bottom:4px; }
+      .result span { display:block; font-size:11px; color: rgba(215,226,247,.66); }
+      details {
+        background: rgba(255,255,255,.035);
+        border: 1px solid rgba(255,255,255,.08);
+        border-radius: 16px;
+        padding: 12px;
+      }
+      summary {
+        cursor: pointer;
+        list-style: none;
+        font-weight: 700;
+        font-size: 13px;
+      }
+      summary::-webkit-details-marker { display:none; }
+      .section-title { font-size: 13px; font-weight: 700; }
+      .toast {
+        position: fixed;
+        right: 18px;
+        bottom: 128px;
+        background: rgba(11, 16, 26, .95);
+        color:#fff;
+        padding:11px 13px;
+        border-radius: 14px;
+        box-shadow: 0 18px 38px rgba(0,0,0,.35);
+        border: 1px solid rgba(255,255,255,.08);
+        max-width: min(340px, calc(100vw - 28px));
+      }
+      .hint { font-size:11px; color: rgba(215,226,247,.6); }
+      .spacer { flex:1; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+      @media (max-width: 640px) {
+        .panel { right: 12px; left: 12px; bottom: 68px; }
+        .card { width: auto; }
+        .actions, .field-grid { grid-template-columns: 1fr; }
+        .bubble { right: 12px; bottom: 12px; }
+        .toast { right: 12px; left: 12px; bottom: 118px; max-width: none; }
+      }
     `;
     shadow.appendChild(style);
 
@@ -394,6 +577,24 @@
   async function getToken() { return (await gm.getValue(STORAGE.access, '')) || ''; }
   async function getRefresh() { return (await gm.getValue(STORAGE.refresh, '')) || ''; }
   async function getExpiry() { const v = await gm.getValue(STORAGE.expires, '0'); const n = parseInt(v, 10) || 0; return n; }
+  async function getSiteProfiles() {
+    const profiles = await getJSON(STORAGE.siteProfiles, {});
+    for (const key of Object.keys(SITE_PROFILES)) delete SITE_PROFILES[key];
+    Object.assign(SITE_PROFILES, profiles || {});
+    return profiles || {};
+  }
+  async function setSiteProfiles(profiles) {
+    const normalized = {};
+    for (const [host, profile] of Object.entries(profiles || {})) {
+      const key = normalizeHost(host);
+      if (!key) continue;
+      normalized[key] = Object.assign({}, profile || {}, { host: key });
+    }
+    for (const key of Object.keys(SITE_PROFILES)) delete SITE_PROFILES[key];
+    Object.assign(SITE_PROFILES, normalized);
+    await setJSON(STORAGE.siteProfiles, normalized);
+    return normalized;
+  }
   async function setTokens(access, refresh, expiresIn) {
     await gm.setValue(STORAGE.access, access || '');
     if (refresh !== undefined) await gm.setValue(STORAGE.refresh, refresh || '');
@@ -432,12 +633,174 @@
   }
 
   // ---- Title/Episode heuristics ----
+  function normalizeHost(host) {
+    return String(host || '').replace(/^www\./i, '').toLowerCase();
+  }
+
+  function parseSelectorList(value, fallback = []) {
+    if (Array.isArray(value)) return value.map(v => String(v || '').trim()).filter(Boolean);
+    if (typeof value !== 'string') return fallback.slice();
+    return value.split(',').map(v => v.trim()).filter(Boolean);
+  }
+
+  function readNodeText(node) {
+    if (!node) return '';
+    const attrs = [
+      node.getAttribute && node.getAttribute('content'),
+      node.getAttribute && node.getAttribute('title'),
+      node.getAttribute && node.getAttribute('aria-label'),
+      node.getAttribute && node.getAttribute('data-title'),
+      node.getAttribute && node.getAttribute('data-name'),
+      node.textContent
+    ].filter(Boolean);
+    return norm(attrs.find(Boolean) || '');
+  }
+
+  function firstUsefulTitle(candidates) {
+    for (const raw of candidates || []) {
+      const cleaned = cleanTitle(raw);
+      const cmp = normalizeCmp(cleaned);
+      if (!cleaned || cleaned.length < 2) continue;
+      if (!cmp || cmp === 'animetsu' || cmp === 'watch' || cmp === 'episode') continue;
+      return cleaned;
+    }
+    return '';
+  }
+
+  function readTextFromSelectors(doc, selectors) {
+    for (const sel of selectors || []) {
+      try {
+        const node = doc.querySelector(sel);
+        const text = readNodeText(node);
+        if (text) return text;
+      } catch { }
+    }
+    return '';
+  }
+
+  function readEpisodeFromSelectors(doc, selectors) {
+    for (const sel of selectors || []) {
+      try {
+        const node = doc.querySelector(sel);
+        if (!node) continue;
+        const attrs = [
+          node.getAttribute && node.getAttribute('data-number'),
+          node.getAttribute && node.getAttribute('data-ep'),
+          node.getAttribute && node.getAttribute('data-episode'),
+          node.getAttribute && node.getAttribute('data-current-episode'),
+          node.getAttribute && node.getAttribute('aria-label'),
+          node.textContent
+        ].filter(Boolean);
+        for (const val of attrs) {
+          const m = String(val).match(/\b(\d{1,4})\b/);
+          if (m) return parseInt(m[1], 10);
+        }
+      } catch { }
+    }
+    return null;
+  }
+
+  function extractNumericRouteId(pathname, prefixes = ['watch', 'anime']) {
+    const parts = String(pathname || '').split('/').filter(Boolean);
+    if (!parts.length) return '';
+    const first = String(parts[0] || '').toLowerCase();
+    if (prefixes.includes(first) && /^\d+$/.test(parts[1] || '')) return parts[1];
+    return parts.find(p => /^\d+$/.test(p)) || '';
+  }
+
+  function extractPathEpisode(pathname) {
+    const parts = String(pathname || '').split('/').filter(Boolean);
+    if (parts.length >= 3 && /^\d+$/.test(parts[2] || '')) return parseInt(parts[2], 10);
+    return null;
+  }
+
+  function readEpisodeFromLinks(doc, matcher) {
+    const activeMatchers = [
+      'a[aria-current="page"]',
+      'a[data-selected]',
+      'a[data-active]',
+      '.active a',
+      'a.active',
+      '.current a',
+      'a.current'
+    ];
+    for (const sel of activeMatchers) {
+      for (const node of qsa(sel, doc)) {
+        const href = node.getAttribute('href') || '';
+        if (matcher && !matcher(href, node)) continue;
+        const text = [
+          node.getAttribute('data-number'),
+          node.getAttribute('data-ep'),
+          node.getAttribute('data-episode'),
+          node.getAttribute('aria-label'),
+          node.textContent
+        ].filter(Boolean).join(' ');
+        const m = text.match(/\b(\d{1,4})\b/);
+        if (m) return parseInt(m[1], 10);
+      }
+    }
+    return null;
+  }
+
+  function titleFromAnimeLinks(doc, animeId) {
+    if (!animeId) return '';
+    const links = qsa(`a[href^="/anime/${animeId}"]`, doc);
+    return firstUsefulTitle(links.flatMap(node => [readNodeText(node)]));
+  }
+
+  function buildCustomProvider(profile, host) {
+    const titleSelectors = parseSelectorList(profile.titleSelectors, ['h1', 'meta[property="og:title"]', 'meta[name="twitter:title"]']);
+    const episodeSelectors = parseSelectorList(profile.episodeSelectors, []);
+    const pathPrefixes = parseSelectorList(profile.pathPrefixes, ['watch', 'anime', 'series', 'show']);
+    const mode = String(profile.mode || 'slug').toLowerCase();
+    const seriesParam = String(profile.seriesQueryParam || 'id').trim() || 'id';
+    const episodeParam = String(profile.episodeQueryParam || 'ep').trim() || 'ep';
+    const siteLabel = String(profile.label || host || '').trim();
+
+    return {
+      key: 'custom:' + host,
+      label: siteLabel,
+      domains: [host],
+      getSeriesKey(doc, loc, currentHost) {
+        if (mode === 'path-id') {
+          const id = extractNumericRouteId(loc.pathname, pathPrefixes);
+          if (id) return `${currentHost}|aid-${id}`;
+        }
+        if (mode === 'query-id') {
+          const id = new URL(loc.href).searchParams.get(seriesParam);
+          if (id) return `${currentHost}|qid-${id}`;
+        }
+        const slug = extractSeriesSlugFromPath(loc.pathname, pathPrefixes);
+        return `${currentHost}|${slug || 'unresolved'}`;
+      },
+      detectTitle(doc, loc) {
+        const direct = firstUsefulTitle([readTextFromSelectors(doc, titleSelectors)]);
+        if (direct) return direct;
+        const generic = firstUsefulTitle([
+          qs('meta[property="og:title"]', doc)?.content,
+          qs('meta[name="twitter:title"]', doc)?.content,
+          qs('h1', doc)?.textContent,
+          document.title
+        ]);
+        if (generic) return generic;
+        const fallbackSlug = extractSeriesSlugFromPath(loc.pathname, pathPrefixes);
+        return fallbackSlug ? titleCase(fallbackSlug) : '';
+      },
+      detectEpisode(doc, loc) {
+        const q = new URL(loc.href).searchParams.get(episodeParam);
+        if (q && /^\d+$/.test(q)) return parseInt(q, 10);
+        const fromSelectors = readEpisodeFromSelectors(doc, episodeSelectors);
+        if (fromSelectors != null) return fromSelectors;
+        return parseEpFromUrlString(loc.href);
+      }
+    };
+  }
+
   const PROVIDERS = {
     hianime: {
       domains: ['hianime.to', 'hianime.tv', 'aniwave.to', 'aniwave.se', 'aniwatch.to', 'aniwatchtv.to'],
       detectTitle(doc, loc) {
         dlog('hianime.detectTitle: start', loc && loc.href);
-        // 1) Canonical/OG/Twitter URL → slug → title
         const canonical = doc.querySelector('link[rel="canonical"]')?.href
           || doc.querySelector('meta[property="og:url"]')?.content
           || doc.querySelector('meta[name="twitter:url"]')?.content
@@ -455,15 +818,11 @@
                 .replace(/-\d{3,}$/i, '')
                 .replace(/[-_]+/g, ' ')
                 .trim();
-              if (slug) {
-                dlog('hianime.detectTitle: canonical slug →', slug);
-                return titleCase(slug);
-              }
+              if (slug) return titleCase(slug);
             }
           } catch { }
         }
 
-        // 2) JSON-LD structured data
         try {
           const nodes = doc.querySelectorAll('script[type="application/ld+json"]');
           for (const n of nodes) {
@@ -471,16 +830,12 @@
             const arr = Array.isArray(data) ? data : [data];
             for (const obj of arr) {
               const nm = obj?.name || obj?.headline || obj?.['@name'] || obj?.alternateName;
-              if (nm && String(nm).trim().length > 1) {
-                dlog('hianime.detectTitle: JSON-LD name →', nm);
-                return cleanTitle(nm);
-              }
+              if (nm && String(nm).trim().length > 1) return cleanTitle(nm);
             }
           }
         } catch { }
 
-        // 3) Common title containers on HiAnime/9anime clones
-        const cand = [
+        return firstUsefulTitle([
           doc.querySelector('.film-name a')?.textContent,
           doc.querySelector('.film-name')?.textContent,
           doc.querySelector('.anisc-detail .name')?.textContent,
@@ -488,42 +843,15 @@
           doc.querySelector('h1')?.textContent,
           doc.querySelector('meta[property="og:title"]')?.content,
           doc.querySelector('meta[name="twitter:title"]')?.content
-        ].filter(Boolean).map(cleanTitle).find(x => x && x.length > 1);
-        if (cand) {
-          dlog('hianime.detectTitle: DOM cand →', cand);
-          return cand;
-        }
-
-        // 4) Fallback from current path
-        try {
-          const parts = loc.pathname.split('/').filter(Boolean);
-          let slug = parts.includes('watch') ? parts[parts.indexOf('watch') + 1] : parts[0] || '';
-          slug = slug
-            .replace(/-episode-?\d+.*/i, '')
-            .replace(/-ep-?\d+.*/i, '')
-            .replace(/-s(?:eason)?-?\d+$/i, '')
-            .replace(/-\d{3,}$/i, '')
-            .replace(/[-_]+/g, ' ')
-            .trim();
-          if (slug) {
-            dlog('hianime.detectTitle: fallback path →', slug);
-            return titleCase(slug);
-          }
-        } catch { }
-
-        dlog('hianime.detectTitle: fallback empty');
-        return '';
+        ]) || '';
       },
 
       detectEpisode(doc, loc) {
-        dlog('hianime.detectEpisode: start', loc && loc.href);
         const currentEpFromURL = (() => {
           const m = loc.href.match(/[?&]ep=([0-9]+)/i);
           return m ? m[1] : null;
         })();
-        dlog('hianime.detectEpisode: url ep=', currentEpFromURL);
 
-        // Active element first
         const activeSelectors = [
           '.ep-item.active',
           '.ep-item a.active',
@@ -534,28 +862,9 @@
           'a.ep-item.active',
           '.detail-infor-content a.active'
         ];
-        for (const sel of activeSelectors) {
-          const el = doc.querySelector(sel);
-          dlog('hianime.detectEpisode: active sel', sel, '→', el && (el.getAttribute('data-number') || el.getAttribute('data-ep') || el.getAttribute('data-episode') || el.textContent));
-          if (!el) continue;
+        const active = readEpisodeFromSelectors(doc, activeSelectors);
+        if (active != null) return active;
 
-          const data = el.getAttribute('data-number') ||
-            el.getAttribute('data-ep') ||
-            el.getAttribute('data-episode');
-          if (data && /^\d+$/.test(data)) {
-            dlog('hianime.detectEpisode: active number →', parseInt(data));
-            return parseInt(data);
-          }
-
-          const t = el.textContent;
-          const m = t?.match(/(\d{1,4})/);
-          if (m) {
-            dlog('hianime.detectEpisode: active number →', parseInt(m[1]));
-            return parseInt(m[1]);
-          }
-        }
-
-        // If URL has ep=xxxx, match anchor with same internal id
         if (currentEpFromURL) {
           const link = [...doc.querySelectorAll('.ep-item a, a.ep-item, a')].find(a =>
             a.href.includes(`ep=${currentEpFromURL}`) ||
@@ -565,40 +874,86 @@
             const num = link.getAttribute('data-number') ||
               link.getAttribute('data-ep') ||
               link.textContent.match(/\d+/)?.[0];
-            if (num) {
-              dlog('hianime.detectEpisode: matched by URL anchor →', parseInt(num));
-              return parseInt(num);
-            }
+            if (num) return parseInt(num, 10);
           }
         }
 
-        // Fallback: highest visible episode number in list
         const nums = [...doc.querySelectorAll('.ep-item, .ep-item a, .list-episode a')]
           .map(x => {
             const v = x.getAttribute('data-number') ||
               x.getAttribute('data-ep') ||
               x.textContent;
             const m = v?.match(/\d+/);
-            return m ? parseInt(m[0]) : null;
+            return m ? parseInt(m[0], 10) : null;
           })
           .filter(Boolean);
-        if (nums.length) {
-          dlog('hianime.detectEpisode: fallback list nums =', nums);
-          dlog('hianime.detectEpisode: fallback picked max →', Math.max(...nums));
-          return Math.max(...nums);
-        }
+        return nums.length ? Math.max(...nums) : null;
+      }
+    },
 
-        return null;
+    animetsu: {
+      domains: ['animetsu.bz', 'animetsu.tv'],
+      getSeriesKey(doc, loc, host) {
+        const animeId = extractNumericRouteId(loc.pathname, ['watch', 'anime']);
+        if (animeId) return `${host}|aid-${animeId}`;
+        return `${host}|${extractSeriesSlugFromPath(loc.pathname) || 'unresolved'}`;
+      },
+      detectTitle(doc, loc) {
+        const animeId = extractNumericRouteId(loc.pathname, ['watch', 'anime']);
+        return firstUsefulTitle([
+          titleFromAnimeLinks(doc, animeId),
+          readTextFromSelectors(doc, [
+            'h1',
+            'main h1',
+            '[aria-current="page"][title]',
+            '[class*="title"]',
+            '[class*="name"]',
+            '[data-title]',
+            'meta[property="og:title"]',
+            'meta[name="twitter:title"]'
+          ]),
+          qs('meta[property="og:title"]', doc)?.content,
+          qs('meta[name="twitter:title"]', doc)?.content,
+          (document.title || '').replace(/\s*[-|]\s*Animetsu.*$/i, '')
+        ]) || '';
+      },
+      detectEpisode(doc, loc) {
+        const url = new URL(loc.href);
+        const fromQuery = url.searchParams.get('ep');
+        if (fromQuery && /^\d+$/.test(fromQuery)) return parseInt(fromQuery, 10);
+
+        const fromPath = extractPathEpisode(loc.pathname);
+        if (fromPath != null) return fromPath;
+
+        const animeId = extractNumericRouteId(loc.pathname, ['watch', 'anime']);
+        const fromActive = readEpisodeFromSelectors(doc, [
+          '[aria-current="page"]',
+          '[data-active]',
+          '[data-selected]',
+          '.active',
+          '.current',
+          '[class*="episode"][class*="active"]'
+        ]);
+        if (fromActive != null) return fromActive;
+
+        const fromLinks = readEpisodeFromLinks(doc, (href) => {
+          if (!href) return false;
+          return href.includes(`/watch/${animeId}`) || href.includes(`ep=${fromQuery || ''}`);
+        });
+        if (fromLinks != null) return fromLinks;
+
+        return parseEpFromUrlString(loc.href);
       }
     }
   };
 
   function getProviderForHost(host) {
-    host = (host || '').replace(/^www\./i, '').toLowerCase();
+    host = normalizeHost(host);
     for (const key in PROVIDERS) {
       if (PROVIDERS[key].domains.includes(host)) return PROVIDERS[key];
     }
-    return null;
+    const profile = SITE_PROFILES[host];
+    return profile ? buildCustomProvider(profile, host) : null;
   }
   function cleanTitle(t) {
     t = norm(t);
@@ -824,19 +1179,17 @@
       }
     }
 
-    // Try exact document.title first (no aggressive cleaning) to keep season/part tokens
     if (document.title && document.title.trim().length > 1) {
-      const dt = preferExactTitle(document.title);
+      const dt = firstUsefulTitle([document.title]);
       if (dt) { dlog('guessTitle: exact document.title →', dt); return dt; }
     }
 
-    // fallback to existing logic
     const ogSlug = fromOgUrlSlug();
     if (ogSlug) { dlog('guessTitle: ogSlug →', ogSlug); return titleCase(ogSlug); }
     const ld = parseJSONLDName();
     if (ld) { dlog('guessTitle: JSON-LD →', ld); return ld; }
 
-    const cand = [
+    const cand = firstUsefulTitle([
       qs('.film-name')?.textContent,
       qs('.anisc-detail .name')?.textContent,
       qs('.dynamic-name')?.textContent,
@@ -849,12 +1202,9 @@
       qs('header h1')?.textContent,
       qs('.title')?.textContent,
       document.title
-    ]
-      .filter(Boolean)
-      .map(cleanTitle)
-      .filter(Boolean);
+    ]);
 
-    if (cand.length) return cand[0];
+    if (cand) return cand;
 
     const parts = location.pathname.split('/').filter(Boolean);
     const prefixes = new Set(['watch', 'anime', 'series', 'stream', 'show']);
@@ -1147,24 +1497,57 @@
   }
   async function ensureHostInSites(host) {
     try {
+      host = normalizeHost(host);
+      if (!host) return;
       const set = new Set(await getJSON(STORAGE.sites, []));
-      if (SEEDED_HOSTS.has(host) && !set.has(host)) {
+      if ((SEEDED_HOSTS.has(host) || SITE_PROFILES[host]) && !set.has(host)) {
         set.add(host);
         await setJSON(STORAGE.sites, Array.from(set));
       }
     } catch { }
   }
   async function isSiteEnabled(host) {
-    try { const set = new Set(await getJSON(STORAGE.sites, [])); return set.has(host); }
+    try {
+      host = normalizeHost(host);
+      const set = new Set((await getJSON(STORAGE.sites, [])).map(normalizeHost));
+      return set.has(host) || !!SITE_PROFILES[host];
+    }
     catch { return false; }
   }
   async function addSite(host) {
     try {
-      const set = new Set(await getJSON(STORAGE.sites, []));
+      host = normalizeHost(host);
+      if (!host) return;
+      const set = new Set((await getJSON(STORAGE.sites, [])).map(normalizeHost));
       set.add(host);
       await setJSON(STORAGE.sites, Array.from(set));
       await updateBubble();
     } catch { }
+  }
+  async function removeSite(host) {
+    try {
+      host = normalizeHost(host);
+      const set = new Set((await getJSON(STORAGE.sites, [])).map(normalizeHost));
+      set.delete(host);
+      await setJSON(STORAGE.sites, Array.from(set));
+    } catch { }
+  }
+  async function saveSiteProfile(host, profile) {
+    host = normalizeHost(host);
+    if (!host) throw new Error('Host is required');
+    const profiles = await getSiteProfiles();
+    profiles[host] = Object.assign({}, profiles[host] || {}, profile || {}, { host });
+    await setSiteProfiles(profiles);
+    await addSite(host);
+    return profiles[host];
+  }
+  async function deleteSiteProfile(host) {
+    host = normalizeHost(host);
+    if (!host) return;
+    const profiles = await getSiteProfiles();
+    delete profiles[host];
+    await setSiteProfiles(profiles);
+    await removeSite(host);
   }
 
   async function getMap(key) {
@@ -1187,9 +1570,17 @@
   }
 
   function getSeriesKey() {
-    const host = location.host.replace(/^www\./i, '').toLowerCase();
+    const host = normalizeHost(location.host);
     dlog('getSeriesKey: start host=', host);
     if (isHomePage()) { dlog('getSeriesKey: homepage → unresolved'); return host + '|unresolved'; }
+    const provider = getProviderForHost(host);
+    if (provider && typeof provider.getSeriesKey === 'function') {
+      const providerKey = provider.getSeriesKey(document, location, host);
+      if (providerKey) {
+        dlog('getSeriesKey: provider key =', providerKey);
+        return providerKey;
+      }
+    }
     // 1) Prefer canonical from og:url if available
     const og = (function () { try { return qs('meta[property="og:url"]')?.content || qs('meta[name="twitter:url"]')?.content; } catch { return ''; } })();
     dlog('getSeriesKey: og url =', og);
@@ -1219,7 +1610,6 @@
     }
 
     // 3) Provider-specific tail cleanup (e.g., HiAnime numeric tails)
-    const provider = getProviderForHost(host);
     if (provider) slug = slug.replace(/-\d{3,}$/, '');
 
     // 4) Final normalization
@@ -1786,67 +2176,119 @@
     } catch { }
   }
 
+  async function clearOAuthFlowState() {
+    sessionStorage.removeItem('animetrack_pkce_verifier');
+    try { await gm.setValue(STORAGE.pkceVer, ''); } catch { }
+    try { await gm.setValue(STORAGE.oauthState, ''); } catch { }
+  }
+
+  async function prepareOAuthFlow() {
+    await getSettings();
+    const verifier = randomString(96);
+    const state = randomString(32);
+    const challenge = await pkceS256(verifier);
+    sessionStorage.setItem('animetrack_pkce_verifier', verifier);
+    await gm.setValue(STORAGE.pkceVer, verifier);
+    await gm.setValue(STORAGE.oauthState, state);
+
+    const url = new URL(MAL_AUTH_URL);
+    url.searchParams.set('response_type', 'code');
+    url.searchParams.set('client_id', MAL_CLIENT_ID);
+    url.searchParams.set('redirect_uri', MAL_REDIRECT_URI);
+    url.searchParams.set('code_challenge', challenge);
+    url.searchParams.set('code_challenge_method', 'S256');
+    url.searchParams.set('state', state);
+    return url.toString();
+  }
+
+  async function beginOAuth() {
+    const popup = window.open('about:blank', '_blank', 'noopener,noreferrer');
+    const authUrl = await prepareOAuthFlow();
+    if (popup) popup.location.replace(authUrl);
+    else window.open(authUrl, '_blank', 'noopener,noreferrer');
+    return authUrl;
+  }
+
+  async function exchangeOAuthCode(code, incomingState = '') {
+    if (!code) throw new Error('Missing OAuth code');
+
+    const savedState = await gm.getValue(STORAGE.oauthState, '');
+    if (savedState && incomingState && incomingState !== savedState) {
+      await gm.setValue(STORAGE.oauthErr, 'State mismatch');
+      throw new Error('State mismatch');
+    }
+
+    await getSettings();
+    let verifier = sessionStorage.getItem('animetrack_pkce_verifier');
+    if (!verifier) verifier = await gm.getValue(STORAGE.pkceVer, '');
+    if (!verifier) throw new Error('Missing PKCE verifier');
+
+    try {
+      const payload = { code: String(code), code_verifier: verifier, redirect_uri: MAL_REDIRECT_URI };
+      const res = await xhr('POST', `${WORKER_URL}/token`, { 'Content-Type': 'application/json' }, JSON.stringify(payload));
+      if (!res || !res.access_token) throw new Error('OAuth exchange failed');
+      await setTokens(res.access_token, res.refresh_token || '', res.expires_in);
+      await gm.setValue(STORAGE.oauthErr, '');
+      toast('Connected to MAL');
+      try { window.dispatchEvent(new CustomEvent('at:status-changed', { detail: { malId: 'any' } })); } catch { }
+      await renderPanel();
+      return true;
+    } catch (e) {
+      const msg = 'OAuth failed: ' + (e && e.message || e);
+      await gm.setValue(STORAGE.oauthErr, String(msg));
+      throw new Error(msg);
+    } finally {
+      await clearOAuthFlowState();
+    }
+  }
+
+  async function disconnectMAL() {
+    await gm.setValue(STORAGE.access, '');
+    await gm.setValue(STORAGE.refresh, '');
+    await gm.setValue(STORAGE.expires, '0');
+    await gm.setValue(STORAGE.oauthErr, '');
+    await clearOAuthFlowState();
+  }
+
+  function extractOAuthPayload(raw) {
+    const out = { code: String(raw || '').trim(), state: '' };
+    try {
+      const parsed = new URL(out.code);
+      out.code = parsed.searchParams.get('code') || '';
+      out.state = parsed.searchParams.get('state') || '';
+      if (!out.code && parsed.hash) {
+        const hash = new URLSearchParams(parsed.hash.replace(/^#/, ''));
+        out.code = hash.get('code') || '';
+        out.state = out.state || hash.get('state') || '';
+      }
+    } catch { }
+    return out;
+  }
+
   // ---- Auto OAuth (message from oauth.html) ----
   window.addEventListener('message', async (ev) => {
     try {
       const okOrigin = /:\/\/shaharaviram1\.github\.io$/i.test(ev.origin);
       if (!okOrigin) return;
       const data = ev.data || {};
-      if (data.source === 'animetrack-oauth' && data.code) {
-        // Verify OAuth state to prevent mismatched/tabbed flows
-        try {
-          const savedState = await gm.getValue(STORAGE.oauthState, '');
-          const incomingState = (typeof data.state === 'string') ? data.state : '';
-          if (savedState && incomingState && incomingState !== savedState) {
-            await gm.setValue(STORAGE.oauthErr, 'State mismatch');
-            toast('OAuth failed: state mismatch');
-            return;
-          }
-        } catch (_) { }
-        console.debug('[AnimeTrack] Received OAuth code via postMessage');
-        // Ack receipt back to oauth.html so it knows we heard it
+      if (data.source !== 'animetrack-oauth' || !data.code) return;
+
+      try {
+        if (ev.source && ev.origin) {
+          ev.source.postMessage({ source: 'animetrack-ack', received: true }, ev.origin);
+        }
+      } catch { }
+
+      try {
+        await exchangeOAuthCode(String(data.code), typeof data.state === 'string' ? data.state : '');
         try {
           if (ev.source && ev.origin) {
-            ev.source.postMessage({ source: 'animetrack-ack', received: true }, ev.origin);
+            ev.source.postMessage({ source: 'animetrack-connected', ok: true }, ev.origin);
           }
-        } catch (_) { }
-        await getSettings(); // ensure MAL_CLIENT_ID / MAL_REDIRECT_URI loaded
-        const code = String(data.code);
-        let verifier = sessionStorage.getItem('animetrack_pkce_verifier');
-        if (!verifier) { try { verifier = await gm.getValue(STORAGE.pkceVer, ''); } catch (_) { verifier = ''; } }
-        if (!verifier) { throw new Error('Missing PKCE verifier'); }
-        const payload = { code, code_verifier: verifier, redirect_uri: MAL_REDIRECT_URI };
-        try {
-          const res = await xhr('POST', `${WORKER_URL}/token`, { 'Content-Type': 'application/json' }, JSON.stringify(payload));
-          if (res && res.access_token) {
-            await setTokens(res.access_token, res.refresh_token || '', res.expires_in);
-            await gm.setValue(STORAGE.oauthErr, '');
-            toast('Connected to MAL');
-            setCachedStatus(null, null); // harmless no-op/bust
-            try { window.dispatchEvent(new CustomEvent('at:status-changed', { detail: { malId: 'any' } })); } catch (_) { }
-            console.debug('[AnimeTrack] OAuth success');
-            await renderPanel();
-            try {
-              if (ev.source && ev.origin) {
-                ev.source.postMessage({ source: 'animetrack-connected', ok: true }, ev.origin);
-              }
-            } catch (_) { }
-          } else {
-            const msg = 'OAuth exchange failed';
-            await gm.setValue(STORAGE.oauthErr, msg);
-            toast(msg);
-            console.warn('[AnimeTrack]', msg);
-          }
-        } catch (e) {
-          const tmsg = 'OAuth failed: ' + (e && e.message || e);
-          await gm.setValue(STORAGE.oauthErr, String(tmsg));
-          toast(tmsg);
-          console.warn('[AnimeTrack] token error', tmsg);
-        } finally {
-          sessionStorage.removeItem('animetrack_pkce_verifier');
-          try { await gm.setValue(STORAGE.pkceVer, ''); } catch (_) { }
-          try { await gm.setValue(STORAGE.oauthState, ''); } catch (_) { }
-        }
+        } catch { }
+      } catch (e) {
+        toast(e && e.message || 'OAuth failed');
+        console.warn('[AnimeTrack] token error', e && e.message || e);
       }
     } catch (e) { console.warn('[AnimeTrack] postMessage handler error', e); }
   });
@@ -1866,7 +2308,7 @@
   }
 
   function _host() {
-    return (location.hostname || '').replace(/^www\./i, '').toLowerCase();
+    return normalizeHost(location.hostname || '');
   }
 
   function _seriesKeySafe() {
@@ -1877,13 +2319,56 @@
     }
   }
 
+  function escapeHtml(value) {
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function statusLabel(status) {
+    if (!status) return 'Not in list';
+    return titleCase(String(status).replace(/_/g, ' '));
+  }
+
+  function providerLabel(host) {
+    const provider = getProviderForHost(host);
+    if (!provider) return 'Generic';
+    if (provider.key && provider.key.startsWith('custom:')) return 'Custom Site';
+    const key = provider.key || Object.keys(PROVIDERS).find(k => PROVIDERS[k] === provider) || host;
+    return titleCase(String(key).replace(/custom:/i, '').replace(/[-_]+/g, ' '));
+  }
+
+  function defaultProfileDraft(host) {
+    host = normalizeHost(host || '');
+    const saved = SITE_PROFILES[host] || {};
+    const animetsuLike = /animetsu/i.test(host);
+    return {
+      host,
+      label: saved.label || '',
+      mode: saved.mode || (animetsuLike ? 'path-id' : 'slug'),
+      pathPrefixes: Array.isArray(saved.pathPrefixes) ? saved.pathPrefixes.join(', ') : (saved.pathPrefixes || 'watch, anime, series, show'),
+      seriesQueryParam: saved.seriesQueryParam || 'id',
+      episodeQueryParam: saved.episodeQueryParam || 'ep',
+      titleSelectors: Array.isArray(saved.titleSelectors)
+        ? saved.titleSelectors.join(', ')
+        : (saved.titleSelectors || (animetsuLike
+          ? 'a[href^="/anime/"], h1, [class*="title"], meta[property="og:title"], meta[name="twitter:title"]'
+          : 'h1, [class*="title"], meta[property="og:title"], meta[name="twitter:title"]')),
+      episodeSelectors: Array.isArray(saved.episodeSelectors)
+        ? saved.episodeSelectors.join(', ')
+        : (saved.episodeSelectors || '[aria-current="page"], [data-active], [data-selected], .active, .current')
+    };
+  }
+
   async function renderPanel() {
     if (!panel) return;
 
     const card = panel.querySelector('#at-card');
     if (!card) return;
 
-    // Never allow panel rendering to crash the whole script
     try {
       await getSettings();
 
@@ -1894,130 +2379,166 @@
       const onHome = isHomePage();
       const enabled = onMAL ? true : await isSiteEnabled(host);
 
-      if (onHome && !onMAL) {
-        card.innerHTML = `
-          <div class="title">AnimeTrack</div>
-          <div class="row"><span class="sub">Tip:</span><span>Open an episode page to detect the show.</span></div>
-          <div class="row" style="margin-top:10px">
-            <button id="at-refresh" class="ghost">Refresh</button>
-            <button id="at-toggle-debug" class="ghost">Toggle debug</button>
-            <div style="flex:1"></div>
-            <button id="at-close" class="ghost">Close</button>
-          </div>
-        `;
-        // wiring below
-      } else {
-        const seriesKey = _seriesKeySafe();
-        const mapped = (onMAL || onHome) ? null : (await getMap(seriesKey) || await ensureAutoMappingIfNeeded());
-        const epGuess = (onMAL || onHome) ? null : guessEpisode();
+      const seriesKey = (!onMAL && !onHome) ? _seriesKeySafe() : '';
+      const mapped = (onMAL || onHome) ? null : (await getMap(seriesKey) || await ensureAutoMappingIfNeeded());
+      const epGuess = (onMAL || onHome) ? null : guessEpisode();
+      const titleGuess = (!onMAL && !onHome) ? guessTitle() : '';
+      const lastErr = await gm.getValue(STORAGE.oauthErr, '');
+      const profileDraft = defaultProfileDraft(!onMAL ? host : '');
 
-        // status preload
-        let myStatus = null;
-        let watchedCount = null;
-        let needsWatching = false;
-        let needsRewatch = false;
+      let myStatus = null;
+      let watchedCount = null;
+      let needsWatching = false;
+      let needsRewatch = false;
 
-        if (!onMAL && authed && mapped && mapped.id) {
-          try {
-            myStatus = await getMyListStatus(mapped.id);
-            if (myStatus) {
-              if (typeof myStatus.num_watched_episodes === 'number') watchedCount = myStatus.num_watched_episodes;
-              else if (typeof myStatus.num_episodes_watched === 'number') watchedCount = myStatus.num_episodes_watched;
-            }
-            const st = (myStatus && myStatus.status) ? String(myStatus.status).toLowerCase() : '';
-            if (st === 'completed') needsRewatch = true;
-            else if (!st || st !== 'watching') needsWatching = true;
-          } catch (_) { }
-        }
-
-        const alreadyWatched = (!onMAL && authed && mapped && mapped.id && watchedCount != null && epGuess != null && Number(epGuess) <= Number(watchedCount));
-        const mappedLine = mapped && mapped.id ? `${mapped.title || 'Mapped'} (#${mapped.id})` : '—';
-        const statusText = (!onMAL && authed && mapped && mapped.id) ? ((myStatus && myStatus.status) ? myStatus.status : 'Not in list') : '—';
-        const watchedText = (!onMAL && authed && mapped && typeof watchedCount === 'number') ? String(watchedCount) : '—';
-        const lastErr = await gm.getValue(STORAGE.oauthErr, '');
-
-        card.innerHTML = `
-          <div class="title">AnimeTrack</div>
-
-          ${!enabled && !onMAL ? `
-          <div class="row">
-            <span class="sub">This site is disabled.</span>
-            <div style="flex:1"></div>
-            <button id="at-enable" class="primary">Enable here</button>
-          </div>` : ``}
-
-          <div class="row">
-            <span class="sub">${authed ? 'Connected to MAL ✅' : 'Not connected ❌'}</span>
-            <div style="flex:1"></div>
-            <button id="at-auth" class="${authed ? 'ghost' : 'primary'}">${authed ? 'Re-connect' : 'Connect MAL'}</button>
-            ${authed ? '<button id="at-disc" class="ghost">Disconnect</button>' : '<button id="at-copy" class="ghost">Copy Auth Link</button>'}
-            ${authed ? '' : '<button id="at-paste" class="ghost">Paste Code</button>'}
-          </div>
-
-          ${!authed && lastErr ? `<div class="row"><span class="sub" style="color:#ffb3b3">Last error: ${String(lastErr).replace(/</g,'&lt;')}</span></div>` : ''}
-
-          ${!onMAL ? `
-          <div class="row">
-            <span class="sub">Mapped:</span>
-            <span class="sub" id="at-map">${mappedLine}</span>
-            <div style="flex:1"></div>
-            <button id="at-unmap" class="ghost" ${mapped && mapped.id ? '' : 'disabled'}>Clear</button>
-          </div>
-          ` : ``}
-
-          ${(!onMAL && authed && mapped && mapped.id) ? `
-          <div class="row">
-            <span class="sub">Status:</span>
-            <span class="sub" id="at-statline">${statusText}</span>
-            <div style="flex:1"></div>
-            ${needsRewatch ? '<button id="at-setwatch" class="primary">Start rewatch</button>' : (needsWatching ? '<button id="at-setwatch" class="primary">Set to Watching</button>' : '')}
-          </div>
-          <div class="row">
-            <span class="sub">Watched:</span>
-            <span class="sub" id="at-wcount">${watchedText}</span>
-          </div>
-          ` : ``}
-
-          ${(!onMAL && (!mapped || !mapped.id)) ? `
-          <div class="row">
-            <input id="at-query" placeholder="Search MAL title…" style="flex:1">
-            <button id="at-search" class="ghost">Search</button>
-          </div>
-          <div id="at-results" class="list" style="display:none"></div>
-          ` : ``}
-
-          ${!onMAL ? `
-          <div class="row">
-            <span class="sub">Episode:</span>
-            <span class="sub">${(epGuess != null) ? ('#' + epGuess) : '—'}</span>
-            <div style="flex:1"></div>
-            <button id="at-mark" class="primary" ${(authed && mapped && mapped.id && epGuess && !alreadyWatched) ? '' : 'disabled'}>
-              ${alreadyWatched ? 'Already watched' : 'Mark watched'}
-            </button>
-          </div>
-          <div class="row"><span class="hint">Auto-mark triggers at 80% (or end). If the player is in an iframe, the iframe tracker will be used.</span></div>
-          ` : ``}
-
-          <div class="row" style="margin-top:10px">
-            <button id="at-refresh" class="ghost">Refresh</button>
-            <button id="at-toggle-debug" class="ghost">Toggle debug</button>
-            <div style="flex:1"></div>
-            <button id="at-close" class="ghost">Close</button>
-          </div>
-
-          <div class="row" style="margin-top:8px">
-            <details style="width:100%">
-              <summary class="sub">Advanced</summary>
-              <div class="row" style="margin-top:8px">
-                <button id="at-copy-logs" class="ghost">Copy logs</button>
-                <button id="at-clear-logs" class="ghost">Clear logs</button>
-              </div>
-            </details>
-          </div>
-        `;
+      if (!onMAL && authed && mapped && mapped.id) {
+        try {
+          myStatus = await getMyListStatus(mapped.id);
+          if (myStatus) {
+            if (typeof myStatus.num_watched_episodes === 'number') watchedCount = myStatus.num_watched_episodes;
+            else if (typeof myStatus.num_episodes_watched === 'number') watchedCount = myStatus.num_episodes_watched;
+          }
+          const st = (myStatus && myStatus.status) ? String(myStatus.status).toLowerCase() : '';
+          if (st === 'completed') needsRewatch = true;
+          else if (!st || st !== 'watching') needsWatching = true;
+        } catch { }
       }
 
-      // --- Wiring (SAFE) ---
+      const alreadyWatched = (!onMAL && authed && mapped && mapped.id && watchedCount != null && epGuess != null && Number(epGuess) <= Number(watchedCount));
+      const displayTitle = onMAL
+        ? 'AnimeTrack'
+        : onHome
+          ? 'Open an episode page'
+          : (mapped?.title || titleGuess || 'Ready to map');
+      const providerText = onMAL ? 'MyAnimeList' : `${providerLabel(host)} · ${host}`;
+      const authText = authed ? 'Connected to MAL' : 'Connect MAL to sync watch progress';
+      const statusText = (!onMAL && authed && mapped && mapped.id) ? statusLabel(myStatus && myStatus.status) : 'Pending';
+      const watchedText = (!onMAL && authed && mapped && typeof watchedCount === 'number') ? String(watchedCount) : '—';
+      const mapText = !onMAL ? (mapped?.title || (titleGuess || 'Not mapped')) : 'Your control panel';
+
+      card.innerHTML = `
+        <div class="at-shell">
+          <div class="at-header">
+            <div class="at-brand">
+              <span class="eyebrow">${escapeHtml(providerText)}</span>
+              <span class="headline">${escapeHtml(displayTitle)}</span>
+              <span class="muted">${escapeHtml(onMAL ? authText : (epGuess ? `Episode ${epGuess}` : 'Episode not detected yet'))}</span>
+            </div>
+            <button id="at-close" class="icon-btn" type="button">×</button>
+          </div>
+
+          <div class="surface hero">
+            <div class="chip-row">
+              <span class="chip">${authed ? 'MAL linked' : 'MAL offline'}</span>
+              ${!onMAL ? `<span class="chip">${enabled ? 'Site active' : 'Site disabled'}</span>` : ''}
+              ${!onMAL && mapped && mapped.id ? `<span class="chip">Mapped</span>` : (!onMAL ? '<span class="chip">Needs mapping</span>' : '')}
+            </div>
+            <div class="row">
+              <div class="metric">
+                <span class="label">Series</span>
+                <span class="value">${escapeHtml(mapText)}</span>
+              </div>
+              <div class="metric">
+                <span class="label">Status</span>
+                <span class="value">${escapeHtml(statusText)}</span>
+              </div>
+              ${!onMAL ? `
+              <div class="metric">
+                <span class="label">Watched</span>
+                <span class="value">${escapeHtml(watchedText)}</span>
+              </div>` : ''}
+            </div>
+            ${!onMAL && !enabled ? `<div class="hint">This host is blocked until you enable it or save a site profile for it.</div>` : ''}
+            ${!authed && lastErr ? `<div class="hint" style="color:#ffc5c5">${escapeHtml(lastErr)}</div>` : ''}
+          </div>
+
+          <div class="actions">
+            ${!enabled && !onMAL ? '<button id="at-enable" class="primary" type="button">Enable This Site</button>' : ''}
+            <button id="at-auth" class="${authed ? 'ghost' : 'primary'}" type="button">${authed ? 'Reconnect MAL' : 'Connect MAL'}</button>
+            ${authed ? '<button id="at-disc" class="ghost" type="button">Disconnect</button>' : '<button id="at-copy-auth" class="ghost" type="button">Copy Auth Link</button>'}
+            ${authed ? '' : '<button id="at-paste-auth" class="ghost" type="button">Paste Code</button>'}
+            ${!onMAL && (needsWatching || needsRewatch) ? `<button id="at-setwatch" class="ghost" type="button">${needsRewatch ? 'Start Rewatch' : 'Set Watching'}</button>` : ''}
+            ${!onMAL ? `<button id="at-mark" class="primary" type="button" ${(authed && mapped && mapped.id && epGuess && !alreadyWatched) ? '' : 'disabled'}>${alreadyWatched ? 'Already Watched' : 'Mark Watched'}</button>` : ''}
+            ${!onMAL && mapped && mapped.id ? '<button id="at-unmap" class="ghost" type="button">Clear Mapping</button>' : ''}
+            <button id="at-refresh" class="ghost" type="button">Refresh</button>
+          </div>
+
+          ${!onMAL ? `
+          <details ${(!mapped || !mapped.id) ? 'open' : ''}>
+            <summary>Remap Title</summary>
+            <div class="stack" style="margin-top:10px">
+              <div class="row">
+                <input id="at-query" value="${escapeHtml((mapped?.title || titleGuess || '').trim())}" placeholder="Search MAL title" style="flex:1">
+                <button id="at-search" class="ghost" type="button">Search</button>
+              </div>
+              <div id="at-results" class="results"></div>
+            </div>
+          </details>` : ''}
+
+          <details ${(!onMAL && !enabled) ? 'open' : ''}>
+            <summary>Site Profiles</summary>
+            <div class="stack" style="margin-top:10px">
+              <div class="field-grid">
+                <div class="field">
+                  <label for="at-profile-host">Host</label>
+                  <input id="at-profile-host" value="${escapeHtml(profileDraft.host)}" placeholder="example.com">
+                </div>
+                <div class="field">
+                  <label for="at-profile-mode">Route mode</label>
+                  <select id="at-profile-mode">
+                    <option value="slug" ${profileDraft.mode === 'slug' ? 'selected' : ''}>Slug from path</option>
+                    <option value="path-id" ${profileDraft.mode === 'path-id' ? 'selected' : ''}>Numeric id in path</option>
+                    <option value="query-id" ${profileDraft.mode === 'query-id' ? 'selected' : ''}>Id from query param</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="at-profile-label">Label</label>
+                  <input id="at-profile-label" value="${escapeHtml(profileDraft.label)}" placeholder="Optional">
+                </div>
+                <div class="field">
+                  <label for="at-profile-prefixes">Path prefixes</label>
+                  <input id="at-profile-prefixes" value="${escapeHtml(profileDraft.pathPrefixes)}" placeholder="watch, anime">
+                </div>
+                <div class="field">
+                  <label for="at-profile-series-param">Series query param</label>
+                  <input id="at-profile-series-param" value="${escapeHtml(profileDraft.seriesQueryParam)}" placeholder="id">
+                </div>
+                <div class="field">
+                  <label for="at-profile-episode-param">Episode query param</label>
+                  <input id="at-profile-episode-param" value="${escapeHtml(profileDraft.episodeQueryParam)}" placeholder="ep">
+                </div>
+              </div>
+              <div class="field">
+                <label for="at-profile-title-selectors">Title selectors</label>
+                <input id="at-profile-title-selectors" value="${escapeHtml(profileDraft.titleSelectors)}" placeholder="h1, meta[property=&quot;og:title&quot;]">
+              </div>
+              <div class="field">
+                <label for="at-profile-episode-selectors">Episode selectors</label>
+                <input id="at-profile-episode-selectors" value="${escapeHtml(profileDraft.episodeSelectors)}" placeholder="[aria-current=&quot;page&quot;], .active">
+              </div>
+              <div class="actions">
+                <button id="at-save-profile" class="primary" type="button">Save Profile</button>
+                <button id="at-delete-profile" class="ghost" type="button">Delete Profile</button>
+              </div>
+              <div class="hint">Saved hosts start running on their own pages after reload because the execution guard reads this profile list at boot.</div>
+            </div>
+          </details>
+
+          <details>
+            <summary>Advanced</summary>
+            <div class="stack" style="margin-top:10px">
+              <div class="actions">
+                <button id="at-toggle-debug" class="ghost" type="button">Toggle Debug</button>
+                <button id="at-copy-logs" class="ghost" type="button">Copy Logs</button>
+                <button id="at-clear-logs" class="ghost" type="button">Clear Logs</button>
+              </div>
+              ${seriesKey ? `<div class="hint">Series key: <span class="mono">${escapeHtml(seriesKey)}</span></div>` : ''}
+              <div class="hint">Auto-mark triggers at 80% playback or on video end. Cross-origin iframe players are handled through the frame tracker.</div>
+            </div>
+          </details>
+        </div>
+      `;
+
       try {
         const $ = (id) => card.querySelector('#' + id);
 
@@ -2026,91 +2547,97 @@
           if (panel) panel.style.display = 'none';
         });
 
-        if ($('at-refresh')) $('at-refresh').addEventListener('click', () => {
-          try { renderPanel(); } catch (_) { }
-        });
+        if ($('at-refresh')) $('at-refresh').addEventListener('click', () => { renderPanel(); });
 
         if ($('at-toggle-debug')) $('at-toggle-debug').addEventListener('click', () => {
           DEBUG = !DEBUG;
-          try { toast('Debug ' + (DEBUG ? 'ON' : 'OFF')); } catch (_) { }
+          toast('Debug ' + (DEBUG ? 'ON' : 'OFF'));
         });
 
         if ($('at-copy-logs')) $('at-copy-logs').addEventListener('click', async () => {
-          try { await copyToClipboard(__AT_LOGS.join('\n')); } catch (_) { toast('Copy failed'); }
+          try { await copyToClipboard(__AT_LOGS.join('\n')); } catch { toast('Copy failed'); }
         });
 
         if ($('at-clear-logs')) $('at-clear-logs').addEventListener('click', () => {
-          try { __AT_LOGS.length = 0; toast('Logs cleared'); } catch (_) { }
+          __AT_LOGS.length = 0;
+          toast('Logs cleared');
         });
 
         if ($('at-enable')) $('at-enable').addEventListener('click', async () => {
-          try { await addSite(_host()); toast('Enabled ✅'); try { updateBubble(); } catch (_) { } } catch (e) { toast('Enable failed'); }
+          try {
+            await addSite(host);
+            toast('Site enabled');
+            await updateBubble();
+            await renderPanel();
+          } catch {
+            toast('Enable failed');
+          }
         });
 
-        // Minimal auth buttons: keep from crashing even if flow funcs differ elsewhere
+        if ($('at-auth')) $('at-auth').addEventListener('click', async () => {
+          try { await beginOAuth(); } catch (e) { toast(e && e.message || 'Auth flow unavailable'); }
+        });
+
         if ($('at-disc')) $('at-disc').addEventListener('click', async () => {
           try {
-            await gm.setValue(STORAGE.access, '');
-            await gm.setValue(STORAGE.refresh, '');
-            await gm.setValue(STORAGE.expires, '0');
-            await gm.setValue(STORAGE.oauthErr, '');
+            await disconnectMAL();
             toast('Disconnected');
-            try { renderPanel(); } catch (_) { }
-          } catch (_) { toast('Disconnect failed'); }
+            await renderPanel();
+          } catch {
+            toast('Disconnect failed');
+          }
         });
 
-        if ($('at-copy')) $('at-copy').addEventListener('click', async () => {
+        if ($('at-copy-auth')) $('at-copy-auth').addEventListener('click', async () => {
           try {
-            // If your project has a dedicated auth link generator elsewhere, it can override this later.
-            // Here we just open the worker landing page as a safe fallback.
-            await copyToClipboard(WORKER_URL);
-          } catch (_) { toast('Copy failed'); }
+            const url = await prepareOAuthFlow();
+            await copyToClipboard(url);
+            toast('Auth link copied');
+          } catch (e) {
+            toast(e && e.message || 'Copy failed');
+          }
         });
 
-        if ($('at-auth')) $('at-auth').addEventListener('click', () => {
+        if ($('at-paste-auth')) $('at-paste-auth').addEventListener('click', async () => {
           try {
-            // Keep behavior non-fatal: if your code defines a proper beginOAuth() elsewhere, it will run.
-            if (typeof beginOAuth === 'function') beginOAuth();
-            else window.open(MAL_REDIRECT_URI, '_blank', 'noopener,noreferrer');
-          } catch (_) { toast('Auth flow unavailable'); }
-        });
-
-        if ($('at-paste')) $('at-paste').addEventListener('click', async () => {
-          try {
-            const code = prompt('Paste the OAuth code:');
-            if (!code) return;
-            toast('Received code (flow handler must process it).');
-          } catch (_) { }
+            const raw = prompt('Paste the MAL code or full callback URL:');
+            if (!raw) return;
+            const { code, state } = extractOAuthPayload(raw);
+            if (!code) return toast('No OAuth code found');
+            await exchangeOAuthCode(code, state);
+          } catch (e) {
+            toast(e && e.message || 'OAuth failed');
+          }
         });
 
         if ($('at-unmap')) $('at-unmap').addEventListener('click', async () => {
           try {
             const key = _seriesKeySafe();
-            const m = await getJSON(STORAGE.maps, {});
-            delete m[key];
-            await setJSON(STORAGE.maps, m);
+            const maps = await getJSON(STORAGE.maps, {});
+            delete maps[key];
+            await setJSON(STORAGE.maps, maps);
             toast('Mapping cleared');
-            try { renderPanel(); } catch (_) { }
-          } catch (_) { toast('Clear failed'); }
+            await renderPanel();
+          } catch {
+            toast('Clear failed');
+          }
         });
 
         if ($('at-setwatch')) $('at-setwatch').addEventListener('click', async () => {
           try {
-            const key = _seriesKeySafe();
-            const mapped = await getMap(key) || await ensureAutoMappingIfNeeded();
-            if (!mapped || !mapped.id) return toast('Not mapped');
-
-            const st = await getMyListStatus(mapped.id);
+            const currentMapped = await getMap(_seriesKeySafe()) || await ensureAutoMappingIfNeeded();
+            if (!currentMapped || !currentMapped.id) return toast('Not mapped');
+            const st = await getMyListStatus(currentMapped.id);
             const status = st && st.status ? String(st.status).toLowerCase() : '';
             if (status === 'completed') {
-              await startRewatch(mapped.id);
-              toast('Rewatch started ✅');
+              await startRewatch(currentMapped.id);
+              toast('Rewatch started');
             } else {
-              await setMyStatusWatching(mapped.id);
-              toast('Set to Watching ✅');
+              await setMyStatusWatching(currentMapped.id);
+              toast('Status set to Watching');
             }
-            setCachedStatus(mapped.id, null);
-            try { renderPanel(); } catch (_) { }
+            setCachedStatus(currentMapped.id, null);
+            await renderPanel();
           } catch (e) {
             toast('Status update failed: ' + (e && e.message || e));
           }
@@ -2118,20 +2645,97 @@
 
         if ($('at-mark')) $('at-mark').addEventListener('click', async () => {
           try {
-            const key = _seriesKeySafe();
-            const mapped = await getMap(key) || await ensureAutoMappingIfNeeded();
-            if (!mapped || !mapped.id) return toast('Not mapped');
+            const currentMapped = await getMap(_seriesKeySafe()) || await ensureAutoMappingIfNeeded();
+            if (!currentMapped || !currentMapped.id) return toast('Not mapped');
             const ep = guessEpisode();
             if (!ep) return toast('Episode not detected');
-
-            await updateMyListEpisodes(mapped.id, Number(ep));
-            await setMyStatusCompletedIfFinished(mapped.id, Number(ep));
-            setCachedStatus(mapped.id, null);
-            toast('Marked episode ' + ep + ' ✅');
-            try { window.dispatchEvent(new CustomEvent('at:status-changed', { detail: { malId: mapped.id } })); } catch (_) { }
-            try { renderPanel(); } catch (_) { }
+            await updateMyListEpisodes(currentMapped.id, Number(ep));
+            await setMyStatusCompletedIfFinished(currentMapped.id, Number(ep));
+            setCachedStatus(currentMapped.id, null);
+            toast('Marked episode ' + ep);
+            try { window.dispatchEvent(new CustomEvent('at:status-changed', { detail: { malId: currentMapped.id } })); } catch { }
+            await renderPanel();
           } catch (e) {
             toast('Mark failed: ' + (e && e.message || e));
+          }
+        });
+
+        const renderSearchResults = async () => {
+          const resultsRoot = $('at-results');
+          const input = $('at-query');
+          if (!resultsRoot || !input) return;
+          const query = input.value.trim() || titleGuess || mapped?.title || '';
+          if (!query) return toast('Enter a title to search');
+          resultsRoot.innerHTML = '<div class="hint">Searching MAL…</div>';
+          const results = await malSearchMulti(query);
+          if (!results.length) {
+            resultsRoot.innerHTML = '<div class="hint">No results found.</div>';
+            return;
+          }
+          resultsRoot.innerHTML = results.slice(0, 12).map(item => {
+            const node = item.node || item;
+            return `
+              <button type="button" class="result" data-mal-id="${node.id}" data-mal-title="${escapeHtml(node.title || '')}">
+                <strong>${escapeHtml(node.title || ('#' + node.id))}</strong>
+                <span>${escapeHtml([node.media_type || '', node.num_episodes ? `${node.num_episodes} eps` : ''].filter(Boolean).join(' · '))}</span>
+              </button>
+            `;
+          }).join('');
+          qsa('.result', resultsRoot).forEach(btn => {
+            btn.addEventListener('click', async () => {
+              try {
+                const malId = parseInt(btn.getAttribute('data-mal-id') || '0', 10);
+                const malTitle = btn.getAttribute('data-mal-title') || '';
+                if (!malId) return;
+                await setMap(_seriesKeySafe(), malId, malTitle);
+                toast('Mapped to ' + malTitle);
+                await renderPanel();
+              } catch {
+                toast('Mapping failed');
+              }
+            });
+          });
+        };
+
+        if ($('at-search')) $('at-search').addEventListener('click', renderSearchResults);
+        if ($('at-query')) $('at-query').addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter') {
+            ev.preventDefault();
+            renderSearchResults();
+          }
+        });
+
+        if ($('at-save-profile')) $('at-save-profile').addEventListener('click', async () => {
+          try {
+            const targetHost = normalizeHost(($('at-profile-host')?.value || '').trim());
+            if (!targetHost) return toast('Host is required');
+            await saveSiteProfile(targetHost, {
+              label: ($('at-profile-label')?.value || '').trim(),
+              mode: $('at-profile-mode')?.value || 'slug',
+              pathPrefixes: parseSelectorList(($('at-profile-prefixes')?.value || '').trim(), ['watch', 'anime']),
+              seriesQueryParam: ($('at-profile-series-param')?.value || 'id').trim() || 'id',
+              episodeQueryParam: ($('at-profile-episode-param')?.value || 'ep').trim() || 'ep',
+              titleSelectors: parseSelectorList(($('at-profile-title-selectors')?.value || '').trim(), ['h1']),
+              episodeSelectors: parseSelectorList(($('at-profile-episode-selectors')?.value || '').trim(), [])
+            });
+            toast(`Saved site profile for ${targetHost}`);
+            if (targetHost === host) await updateBubble();
+            await renderPanel();
+          } catch (e) {
+            toast(e && e.message || 'Save failed');
+          }
+        });
+
+        if ($('at-delete-profile')) $('at-delete-profile').addEventListener('click', async () => {
+          try {
+            const targetHost = normalizeHost(($('at-profile-host')?.value || '').trim());
+            if (!targetHost) return toast('Host is required');
+            await deleteSiteProfile(targetHost);
+            toast(`Removed site profile for ${targetHost}`);
+            if (targetHost === host) await updateBubble();
+            await renderPanel();
+          } catch {
+            toast('Delete failed');
           }
         });
 
@@ -2140,16 +2744,21 @@
       }
 
     } catch (e) {
-      // Render a minimal safe UI so the bubble still works even if something else is broken.
       try {
         card.innerHTML = `
-          <div class="title">AnimeTrack</div>
-          <div class="row"><span class="sub" style="color:#ffb3b3">Panel crashed: ${String(e && e.message || e).replace(/</g,'&lt;')}</span></div>
-          <div class="row" style="margin-top:10px">
-            <button id="at-refresh" class="ghost">Refresh</button>
-            <button id="at-toggle-debug" class="ghost">Toggle debug</button>
-            <div style="flex:1"></div>
-            <button id="at-close" class="ghost">Close</button>
+          <div class="at-shell">
+            <div class="at-header">
+              <div class="at-brand">
+                <span class="eyebrow">AnimeTrack</span>
+                <span class="headline">Panel error</span>
+                <span class="muted">${escapeHtml(String(e && e.message || e))}</span>
+              </div>
+              <button id="at-close" class="icon-btn" type="button">×</button>
+            </div>
+            <div class="actions">
+              <button id="at-refresh" class="ghost" type="button">Refresh</button>
+              <button id="at-toggle-debug" class="ghost" type="button">Toggle Debug</button>
+            </div>
           </div>
         `;
         const btnR = card.querySelector('#at-refresh');
@@ -2173,6 +2782,7 @@
   // Initial boot
   try { if (!isFrame) ensureShell(); } catch (_) { }
   try { seedSitesOnce(); } catch (_) { }
+  try { getSiteProfiles(); } catch (_) { }
   try { updateBubble(); } catch (_) { }
 
   // React to SPA navigations

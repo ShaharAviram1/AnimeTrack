@@ -48,6 +48,7 @@
       const btn = document.getElementById('copyBtn');
 
       const code = getParam('code');
+      const state = getParam('state');
       dbg.textContent = code ? 'Received code ✓' : 'No code in URL';
 
       let posted = false;
@@ -80,7 +81,7 @@
 
       try {
         if (window.opener && code) {
-          window.opener.postMessage({ source:'animetrack-oauth', code: code }, '*');
+          window.opener.postMessage({ source:'animetrack-oauth', code: code, state: state || '' }, '*');
           posted = true;
           dbg.textContent = 'Posted code to opener… waiting for ack…';
         }
