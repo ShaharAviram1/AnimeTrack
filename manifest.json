@@ -1,6 +1,6 @@
 {
   "name": "AnimeTrack",
-  "version": "1.9.0",
+  "version": "1.9.1",
   "files": {
     "userscript": "animeTrack.user.js"
   },

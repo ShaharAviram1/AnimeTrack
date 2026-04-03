@@ -2,7 +2,7 @@
 // @name         AnimeTrack
 // @namespace    https://github.com/ShaharAviram1/AnimeTrack
 // @description  Fast anime scrobbler for MAL: adaptive site profiles, auto-map titles, MAL OAuth (PKCE S256), auto-mark at 80%, focused Shadow-DOM UI.
-// @version      1.9.0
+// @version      1.9.1
 // @author       Shahar Aviram
 // @license      GPL-3.0
 // @homepageURL  https://github.com/ShaharAviram1/AnimeTrack
@@ -280,6 +280,7 @@
   function norm(s) { return (s || '').replace(/\s+/g, ' ').trim(); }
   function encodeForm(obj) { return Object.keys(obj).map(k => `${encodeURIComponent(k)}=${encodeURIComponent(obj[k])}`).join('&'); }
   function titleCase(s) { return (s || '').split(' ').map(w => w ? (w[0].toUpperCase() + w.slice(1)) : w).join(' '); }
+  function escapeRegExp(s) { return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
   // Prefer exact title (only trim/collapse spaces) for first MAL search to avoid partial matches
   function preferExactTitle(s) {
@@ -678,22 +679,56 @@
     return '';
   }
 
-  function readEpisodeFromSelectors(doc, selectors) {
+  function parseEpisodeCandidate(value, animeId) {
+    if (value == null) return null;
+    const raw = String(value).trim();
+    if (!raw) return null;
+
+    if (animeId) {
+      const routeRe = new RegExp(`/watch/${escapeRegExp(animeId)}(?:/|\\?|$)`, 'i');
+      if (!routeRe.test(raw) && !raw.includes(`anime/${animeId}`) && !raw.includes(`?id=${animeId}`)) {
+        const directEp = raw.match(/\b(?:data-)?(?:ep|episode|ep_num)\s*[:=_ -]?(\d{1,4})\b/i);
+        if (directEp) return parseInt(directEp[1], 10);
+      }
+    }
+
+    let m = raw.match(/[?&#](?:ep|episode|ep_num)=([0-9]{1,4})/i);
+    if (m) return parseInt(m[1], 10);
+    m = raw.match(/\/watch\/\d+\/(\d{1,4})(?:[^0-9]|$)/i);
+    if (m) return parseInt(m[1], 10);
+    m = raw.match(/\b(?:ep|episode|ep_num|e)\s*[:=_ -]?(\d{1,4})\b/i);
+    if (m) return parseInt(m[1], 10);
+    m = raw.match(/^\s*(?:#|ep\.?\s*)?(\d{1,4})\s*$/i);
+    if (m) return parseInt(m[1], 10);
+    return null;
+  }
+
+  function readEpisodeFromSelectors(doc, selectors, opts = {}) {
+    const animeId = opts.animeId || '';
     for (const sel of selectors || []) {
       try {
-        const node = doc.querySelector(sel);
-        if (!node) continue;
-        const attrs = [
-          node.getAttribute && node.getAttribute('data-number'),
-          node.getAttribute && node.getAttribute('data-ep'),
-          node.getAttribute && node.getAttribute('data-episode'),
-          node.getAttribute && node.getAttribute('data-current-episode'),
-          node.getAttribute && node.getAttribute('aria-label'),
-          node.textContent
-        ].filter(Boolean);
-        for (const val of attrs) {
-          const m = String(val).match(/\b(\d{1,4})\b/);
-          if (m) return parseInt(m[1], 10);
+        const nodes = qsa(sel, doc);
+        for (const node of nodes) {
+          if (!node) continue;
+          const attrs = [
+            node.getAttribute && node.getAttribute('data-number'),
+            node.getAttribute && node.getAttribute('data-num'),
+            node.getAttribute && node.getAttribute('data-ep'),
+            node.getAttribute && node.getAttribute('data-ep-num'),
+            node.getAttribute && node.getAttribute('data-ep_num'),
+            node.getAttribute && node.getAttribute('data-episode'),
+            node.getAttribute && node.getAttribute('data-current-episode'),
+            node.getAttribute && node.getAttribute('data-current'),
+            node.getAttribute && node.getAttribute('data-id'),
+            node.getAttribute && node.getAttribute('title'),
+            node.getAttribute && node.getAttribute('aria-label'),
+            node.getAttribute && node.getAttribute('href'),
+            node.textContent
+          ].filter(Boolean);
+          for (const val of attrs) {
+            const ep = parseEpisodeCandidate(val, animeId);
+            if (ep != null) return ep;
+          }
         }
       } catch { }
     }
@@ -714,29 +749,42 @@
     return null;
   }
 
-  function readEpisodeFromLinks(doc, matcher) {
+  function readEpisodeFromLinks(doc, matcher, opts = {}) {
+    const animeId = opts.animeId || '';
     const activeMatchers = [
       'a[aria-current="page"]',
       'a[data-selected]',
       'a[data-active]',
+      'a[aria-selected="true"]',
+      'a[aria-pressed="true"]',
       '.active a',
       'a.active',
       '.current a',
-      'a.current'
+      'a.current',
+      '[class*="episode"].active a',
+      '[class*="episode"][aria-current="page"]'
     ];
     for (const sel of activeMatchers) {
       for (const node of qsa(sel, doc)) {
         const href = node.getAttribute('href') || '';
         if (matcher && !matcher(href, node)) continue;
-        const text = [
+        const values = [
+          href,
           node.getAttribute('data-number'),
+          node.getAttribute('data-num'),
           node.getAttribute('data-ep'),
+          node.getAttribute('data-ep-num'),
+          node.getAttribute('data-ep_num'),
           node.getAttribute('data-episode'),
+          node.getAttribute('data-current'),
+          node.getAttribute('title'),
           node.getAttribute('aria-label'),
           node.textContent
-        ].filter(Boolean).join(' ');
-        const m = text.match(/\b(\d{1,4})\b/);
-        if (m) return parseInt(m[1], 10);
+        ].filter(Boolean);
+        for (const value of values) {
+          const ep = parseEpisodeCandidate(value, animeId);
+          if (ep != null) return ep;
+        }
       }
     }
     return null;
@@ -744,8 +792,23 @@
 
   function titleFromAnimeLinks(doc, animeId) {
     if (!animeId) return '';
-    const links = qsa(`a[href^="/anime/${animeId}"]`, doc);
-    return firstUsefulTitle(links.flatMap(node => [readNodeText(node)]));
+    const selectors = [
+      `a[href^="/anime/${animeId}"]`,
+      `a[href*="/anime/${animeId}"]`,
+      `a[href^="/watch/${animeId}"]`,
+      `a[href*="/watch/${animeId}"]`
+    ];
+    const links = selectors.flatMap(sel => qsa(sel, doc));
+    return firstUsefulTitle(links.flatMap(node => {
+      const scope = node.closest('article, section, header, main, div, li') || node.parentElement || node;
+      return [
+        readNodeText(node),
+        readTextFromSelectors(scope, ['h1', 'h2', 'h3', '[class*="title"]', '[class*="name"]']),
+        readNodeText(node.previousElementSibling),
+        readNodeText(node.nextElementSibling),
+        readNodeText(scope)
+      ];
+    }));
   }
 
   function buildCustomProvider(profile, host) {
@@ -903,9 +966,24 @@
         return firstUsefulTitle([
           titleFromAnimeLinks(doc, animeId),
           readTextFromSelectors(doc, [
+            `[href^="/anime/${animeId}"] [class*="title"]`,
+            `[href^="/anime/${animeId}"] [class*="name"]`,
+            `[href*="/anime/${animeId}"] [class*="title"]`,
+            `[href*="/anime/${animeId}"] [class*="name"]`,
+            '[data-headlessui-state="open"] [class*="title"]',
+            '[data-headlessui-state="open"] [class*="name"]',
+            'nav [aria-current="page"]',
+            'main header h1',
+            'main [class*="title"]',
+            'main [class*="name"]'
+          ]),
+          readTextFromSelectors(doc, [
             'h1',
             'main h1',
             '[aria-current="page"][title]',
+            '[aria-current="page"]',
+            '[data-current="true"] [class*="title"]',
+            '[data-current="true"] [class*="name"]',
             '[class*="title"]',
             '[class*="name"]',
             '[data-title]',
@@ -928,19 +1006,38 @@
         const animeId = extractNumericRouteId(loc.pathname, ['watch', 'anime']);
         const fromActive = readEpisodeFromSelectors(doc, [
           '[aria-current="page"]',
+          '[aria-selected="true"]',
+          '[aria-pressed="true"]',
           '[data-active]',
           '[data-selected]',
+          '[data-current="true"]',
+          '[data-state="active"]',
+          '[data-state="selected"]',
           '.active',
           '.current',
-          '[class*="episode"][class*="active"]'
-        ]);
+          '[class*="episode"][class*="active"]',
+          '[class*="episode"][aria-current="page"]',
+          '[class*="episode"][data-state="active"]',
+          '[class*="episode"][data-selected]'
+        ], { animeId });
         if (fromActive != null) return fromActive;
 
         const fromLinks = readEpisodeFromLinks(doc, (href) => {
           if (!href) return false;
-          return href.includes(`/watch/${animeId}`) || href.includes(`ep=${fromQuery || ''}`);
-        });
+          return href.includes(`/watch/${animeId}`) || href.includes(`/anime/${animeId}`) || /\bep(?:isode)?=/.test(href);
+        }, { animeId });
         if (fromLinks != null) return fromLinks;
+
+        const fromEpisodeLists = readEpisodeFromSelectors(doc, [
+          'a[href*="/watch/"]',
+          'button[data-episode]',
+          'button[data-ep]',
+          '[class*="episode"] a',
+          '[class*="episode"] button',
+          '[class*="ep"] a',
+          '[class*="ep"] button'
+        ], { animeId });
+        if (fromEpisodeLists != null) return fromEpisodeLists;
 
         return parseEpFromUrlString(loc.href);
       }
@@ -1012,7 +1109,25 @@
     // part/cour synonyms
     m = t.match(/\bpart\s*(\d{1,2})\b/); if (m) return parseInt(m[1], 10);
     m = t.match(/\bcour\s*(\d{1,2})\b/); if (m) return parseInt(m[1], 10);
+    m = t.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s*(?:cour|part)\b/); if (m) return parseInt(m[1], 10);
     // phrases like "final season" cannot map to a number reliably → return null
+    return null;
+  }
+  function detectSequelNumber(s) {
+    if (!s) return null;
+    const explicit = detectSeasonNumber(s);
+    if (explicit != null) return explicit;
+    const t = normalizeCmp(s).replace(/\b(episode|ep|movie|film)\s*\d+\b/g, '').trim();
+    let m = t.match(/\b(\d{1,2})\s*$/);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (n >= 2 && n <= 12) return n;
+    }
+    m = t.match(/\b([ivxlcdm]+)\s*$/i);
+    if (m) {
+      const n = romanToInt(m[1]);
+      if (n >= 2 && n <= 12) return n;
+    }
     return null;
   }
   function stripSeasonPhrases(s) {
@@ -1022,7 +1137,10 @@
       .replace(/\bseason\s*[ivxlcdm]+\b/ig, '')
       .replace(/\b[ivxlcdm]+\s*season\b/ig, '')
       .replace(/\bseason\s*\d{1,2}\b/ig, '')
+      .replace(/\b(\d{1,2})(?:st|nd|rd|th)?\s*(?:cour|part)\b/ig, '')
       .replace(/\bs\s*\d{1,2}\b/ig, '')
+      .replace(/\bpart\s*\d{1,2}\b/ig, '')
+      .replace(/\bcour\s*\d{1,2}\b/ig, '')
       .replace(/\s{2,}/g, ' ').trim();
   }
   function detectMovieIndexFromGuess(s) {
@@ -1132,6 +1250,23 @@
       else if (typeof v === 'string') alts.push(v);
     });
     return alts.filter(Boolean);
+  }
+  function preferredMALTitle(node) {
+    if (!node) return '';
+    const at = node.alternative_titles || {};
+    return firstUsefulTitle([
+      at.en,
+      at.en_jp,
+      node.title,
+      at.ja,
+      at.ja_jp
+    ]) || '';
+  }
+  function mappedDisplayTitle(mapped) {
+    return firstUsefulTitle([
+      mapped && mapped.displayTitle,
+      mapped && mapped.title
+    ]) || '';
   }
   function fromOgUrlSlug() {
     try {
@@ -1555,16 +1690,24 @@
       const m = await getJSON(STORAGE.maps, {});
       const v = m[key];
       if (!v) return null;
-      if (typeof v === 'number') return { id: v, title: '' };
-      return v;
+      if (typeof v === 'number') return { id: v, title: '', displayTitle: '' };
+      return {
+        id: v.id,
+        title: v.title || '',
+        displayTitle: v.displayTitle || v.title || ''
+      };
     } catch { return null; }
   }
-  async function setMap(key, malId, malTitle) {
+  async function setMap(key, malId, malTitle, malDisplayTitle) {
     try {
       const m = await getJSON(STORAGE.maps, {});
-      m[key] = { id: malId, title: malTitle || '' };
+      m[key] = {
+        id: malId,
+        title: malTitle || '',
+        displayTitle: malDisplayTitle || malTitle || ''
+      };
       await setJSON(STORAGE.maps, m);
-      toast(`Mapped → ${malTitle || ('#' + malId)}`);
+      toast(`Mapped → ${(malDisplayTitle || malTitle || ('#' + malId))}`);
       await renderPanel();
     } catch { }
   }
@@ -1622,6 +1765,9 @@
     if (!data || !data.length) return null;
     const gRaw = guess || '';
     const gNorm = normalizeCmp(gRaw);
+    const gSeason = detectSeasonNumber(gRaw);
+    const gSequel = detectSequelNumber(gRaw);
+    const gSplitMarker = /\b(?:part|cour)\b/i.test(gRaw);
 
     function score(node) {
       const all = titlesOf(node);
@@ -1631,6 +1777,9 @@
       for (const t of all) {
         const n = normalizeCmp(t);
         if (!n) continue;
+        const candidateSeason = detectSeasonNumber(t);
+        const candidateSequel = detectSequelNumber(t);
+        const candidateSplitMarker = /\b(?:part|cour)\b/i.test(t);
 
         // --- Exact equality: decisive ---
         if (n === gNorm) return 150; // exact normalized title/alt-title wins decisively
@@ -1646,7 +1795,17 @@
         if (longEnough && nHasWords && gHasWords && (gNorm.includes(n) || n.includes(gNorm))) {
           // Strength by shorter string length to prefer more specific titles
           const shorter = Math.min(n.length, gNorm.length);
-          return shorter >= 14 ? 138 : 130;
+          let containmentScore = shorter >= 14 ? 138 : 130;
+          if (gSeason != null) {
+            if (candidateSeason === gSeason || candidateSequel === gSeason) containmentScore += 18;
+            else if (candidateSeason != null && candidateSeason !== gSeason) containmentScore -= 80;
+            else containmentScore -= 36;
+          } else if (gSequel != null) {
+            if (candidateSequel === gSequel) containmentScore += 14;
+            else if (candidateSequel != null && candidateSequel !== gSequel) containmentScore -= 56;
+          }
+          if (gSplitMarker && candidateSplitMarker) containmentScore += 8;
+          return containmentScore;
         }
 
         // --- Token overlap: require real agreement (≥2 shared tokens and ≥0.5 ratio) ---
@@ -1656,6 +1815,21 @@
         const overlap = inter / Math.max(1, Math.min(gTokens.size, nTokens.size));
         if (inter >= 2 && overlap >= 0.5) {
           s = Math.floor(overlap * 100) - 5; // scale by overlap; discourage weak partials
+        }
+        if (s >= 0) {
+          if (gSeason != null) {
+            if (candidateSeason === gSeason) s += 58;
+            else if (candidateSeason != null && candidateSeason !== gSeason) s -= 78;
+            else if (candidateSequel === gSeason) s += 34;
+          } else if (gSequel != null) {
+            if (candidateSequel === gSequel) s += 44;
+            else if (candidateSequel != null && candidateSequel !== gSequel) s -= 54;
+          }
+
+          if (gSplitMarker) {
+            if (candidateSplitMarker) s += 12;
+            else if (candidateSeason == null && candidateSequel == null) s -= 10;
+          }
         }
         // Generic media-type and length preferences (franchise-agnostic)
         if (s >= 0) {
@@ -1688,6 +1862,7 @@
             const candBases = titlesOf(node).map(baseFranchiseWithDiscriminators).filter(Boolean);
             const baseHit = candBases.some(b => b === gBase);
             if (baseHit) {
+              s += 14;
               // Apply priors unless the user intended a movie
               if (!movieWanted) {
                 if (node.media_type === 'tv') s += 40;
@@ -1769,8 +1944,8 @@
         const canonId = canon[base];
         if (canonId) {
           dlog('ensureAutoMappingIfNeeded: using learned canon for', base, '→', canonId);
-          await setMap(key, canonId, guess);
-          return { id: canonId, title: guess };
+          await setMap(key, canonId, guess, guess);
+          return { id: canonId, title: guess, displayTitle: guess };
         }
       } catch (_) { }
     }
@@ -1799,8 +1974,9 @@
       dlog('ensureAutoMappingIfNeeded: picked=', picked && { id: picked.id, title: picked.title });
     }
     if (!picked) { toast('Title not found. Use search to map.'); return null; }
-    await setMap(key, picked.id, picked.title);
-    return { id: picked.id, title: picked.title };
+    const displayTitle = preferredMALTitle(picked) || picked.title;
+    await setMap(key, picked.id, picked.title, displayTitle);
+    return { id: picked.id, title: picked.title, displayTitle };
   }
 
   // ---- Bubble logic ----
@@ -2409,12 +2585,12 @@
         ? 'AnimeTrack'
         : onHome
           ? 'Open an episode page'
-          : (mapped?.title || titleGuess || 'Ready to map');
+          : (mappedDisplayTitle(mapped) || titleGuess || 'Ready to map');
       const providerText = onMAL ? 'MyAnimeList' : `${providerLabel(host)} · ${host}`;
       const authText = authed ? 'Connected to MAL' : 'Connect MAL to sync watch progress';
       const statusText = (!onMAL && authed && mapped && mapped.id) ? statusLabel(myStatus && myStatus.status) : 'Pending';
       const watchedText = (!onMAL && authed && mapped && typeof watchedCount === 'number') ? String(watchedCount) : '—';
-      const mapText = !onMAL ? (mapped?.title || (titleGuess || 'Not mapped')) : 'Your control panel';
+      const mapText = !onMAL ? (mappedDisplayTitle(mapped) || (titleGuess || 'Not mapped')) : 'Your control panel';
 
       card.innerHTML = `
         <div class="at-shell">
@@ -2468,7 +2644,7 @@
             <summary>Remap Title</summary>
             <div class="stack" style="margin-top:10px">
               <div class="row">
-                <input id="at-query" value="${escapeHtml((mapped?.title || titleGuess || '').trim())}" placeholder="Search MAL title" style="flex:1">
+                <input id="at-query" value="${escapeHtml((mappedDisplayTitle(mapped) || titleGuess || '').trim())}" placeholder="Search MAL title" style="flex:1">
                 <button id="at-search" class="ghost" type="button">Search</button>
               </div>
               <div id="at-results" class="results"></div>
@@ -2664,7 +2840,7 @@
           const resultsRoot = $('at-results');
           const input = $('at-query');
           if (!resultsRoot || !input) return;
-          const query = input.value.trim() || titleGuess || mapped?.title || '';
+          const query = input.value.trim() || titleGuess || mappedDisplayTitle(mapped) || mapped?.title || '';
           if (!query) return toast('Enter a title to search');
           resultsRoot.innerHTML = '<div class="hint">Searching MAL…</div>';
           const results = await malSearchMulti(query);
@@ -2674,10 +2850,11 @@
           }
           resultsRoot.innerHTML = results.slice(0, 12).map(item => {
             const node = item.node || item;
+            const display = preferredMALTitle(node) || node.title || ('#' + node.id);
             return `
-              <button type="button" class="result" data-mal-id="${node.id}" data-mal-title="${escapeHtml(node.title || '')}">
-                <strong>${escapeHtml(node.title || ('#' + node.id))}</strong>
-                <span>${escapeHtml([node.media_type || '', node.num_episodes ? `${node.num_episodes} eps` : ''].filter(Boolean).join(' · '))}</span>
+              <button type="button" class="result" data-mal-id="${node.id}" data-mal-title="${escapeHtml(node.title || '')}" data-mal-display-title="${escapeHtml(display)}">
+                <strong>${escapeHtml(display)}</strong>
+                <span>${escapeHtml([node.title && node.title !== display ? node.title : '', node.media_type || '', node.num_episodes ? `${node.num_episodes} eps` : ''].filter(Boolean).join(' · '))}</span>
               </button>
             `;
           }).join('');
@@ -2686,9 +2863,10 @@
               try {
                 const malId = parseInt(btn.getAttribute('data-mal-id') || '0', 10);
                 const malTitle = btn.getAttribute('data-mal-title') || '';
+                const malDisplayTitle = btn.getAttribute('data-mal-display-title') || malTitle;
                 if (!malId) return;
-                await setMap(_seriesKeySafe(), malId, malTitle);
-                toast('Mapped to ' + malTitle);
+                await setMap(_seriesKeySafe(), malId, malTitle, malDisplayTitle);
+                toast('Mapped to ' + malDisplayTitle);
                 await renderPanel();
               } catch {
                 toast('Mapping failed');

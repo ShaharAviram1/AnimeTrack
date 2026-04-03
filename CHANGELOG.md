@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.9.1] - 2026-04-03
+- Tightened `animetsu.bz` title and episode detection around numeric watch routes and active episode controls.
+- Improved sequel, season, part, and cour matching so MAL auto-mapping favors the right entry more reliably.
+- Prefer English MAL titles in the panel and remap search results when available.
+
 ## [1.9.0] - 2026-04-02
 - Added built-in support for `animetsu.bz` with provider-aware ID-based mapping.
 - Improved title and episode recognition for the new site and generic custom-host profiles.
